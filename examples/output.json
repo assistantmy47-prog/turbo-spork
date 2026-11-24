@@ -1,0 +1,19 @@
+{
+  "batch_id": "example",
+  "dispositions": [
+    {
+      "record_number": 1,
+      "action": "provide_information",
+      "reason": "",
+      "priority": "normal",
+      "summary": "Confirm the reconciled inventory figures",
+      "status": "open",
+      "existing_key": "",
+      "owner": "me",
+      "due": "2026-11-25",
+      "blocker": "",
+      "next_step": "Check the reconciliation totals before responding.",
+      "draft": "Hi [name], the reconciled inventory figures are [verified figures]."
+    }
+  ]
+}

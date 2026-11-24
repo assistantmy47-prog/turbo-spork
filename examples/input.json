@@ -1,0 +1,16 @@
+{
+  "batch_id": "example",
+  "records": [
+    {
+      "record_number": 1,
+      "id": "mail:example",
+      "kind": "mail",
+      "date": "2026-11-23T15:00:00Z",
+      "subject": "Inventory reconciliation",
+      "direction": "received",
+      "from": "colleague@example.invalid",
+      "body": "Could you confirm the reconciled inventory figures by 25 November 2026?",
+      "body_truncated": false
+    }
+  ]
+}
