@@ -1,13 +1,8 @@
-"""Read and reconcile data from Microsoft Graph."""
+"""Normalize and reconcile Outlook and Planner records."""
 import datetime as dt
-from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
-import json
 import re
-import time
-from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.parse import quote
 
 GRAPH = "https://graph.microsoft.com/v1.0"
 UTC = dt.timezone.utc
@@ -15,71 +10,6 @@ UTC = dt.timezone.utc
 
 class CoverageError(Exception):
     pass
-
-
-class NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-class Graph:
-    def __init__(self, config):
-        import msal
-
-        if not all(config.get(key) for key in ("tenant_id", "client_id", "work_account")):
-            raise ValueError("Set tenant_id, client_id and work_account in config.json.")
-        scopes = ["User.Read", "Mail.Read", "Calendars.Read"]
-        if config["planner"]["mode"] != "off":
-            scopes.append("Tasks.Read")
-        app = msal.PublicClientApplication(
-            config["client_id"],
-            authority=f"https://login.microsoftonline.com/{config['tenant_id']}",
-            exclude_scopes=["offline_access"],
-        )
-        token = app.acquire_token_interactive(scopes, login_hint=config["work_account"])
-        if "access_token" not in token:
-            raise ValueError(f"Microsoft sign-in failed ({token.get('error', 'unknown error')}). Check tenant consent and Conditional Access.")
-        self.token = token["access_token"]
-        self.opener = build_opener(NoRedirect)
-
-    def get(self, url):
-        destination = urlsplit(url)
-        if destination.scheme != "https" or destination.netloc != "graph.microsoft.com":
-            raise CoverageError("Unexpected Graph pagination destination.")
-        request = Request(url, headers={
-            "Authorization": f"Bearer {self.token}",
-            "Prefer": 'IdType="ImmutableId", outlook.body-content-type="text", outlook.timezone="UTC"',
-        })
-        for attempt in range(5):
-            try:
-                with self.opener.open(request, timeout=60) as result:
-                    return json.load(result)
-            except HTTPError as error:
-                if error.code not in (429, 500, 502, 503, 504) or attempt == 4:
-                    raise CoverageError(f"Graph HTTP {error.code} for {destination.path}") from None
-                delay = error.headers.get("Retry-After", str(2 ** attempt))
-                if delay.isdigit():
-                    seconds = int(delay)
-                else:
-                    seconds = (parsedate_to_datetime(delay) - dt.datetime.now(UTC)).total_seconds()
-                if seconds > 60:
-                    raise CoverageError(f"Graph requested a {seconds:.0f}s retry delay. Retry later.") from None
-                time.sleep(max(0, seconds))
-            except (URLError, TimeoutError):
-                if attempt == 4:
-                    raise CoverageError(f"Graph connection failed for {destination.path}") from None
-                time.sleep(2 ** attempt)
-
-    def pages(self, path, params):
-        url = GRAPH + path + ("?" + urlencode(params) if params else "")
-        visited = set()
-        while url:
-            if url in visited:
-                raise CoverageError("Graph returned a repeating page link.")
-            visited.add(url)
-            payload = self.get(url)
-            yield payload["value"]
-            url = payload.get("@odata.nextLink")
 
 
 def stamp(value):
@@ -160,15 +90,11 @@ def reconcile(graph, name, path, params, fields, notes):
 
 
 def collect(graph, config, start, end, today_start, today_end, notes):
-    account = graph.get(GRAPH + "/me?$select=id,mail,userPrincipalName,proxyAddresses")
-    expected = config["work_account"].casefold()
-    identities = {account.get(key, "").casefold() for key in ("mail", "userPrincipalName") if account.get(key)}
-    if expected not in identities:
-        raise CoverageError("Signed-in mailbox does not match work_account.")
-    identities.update(x.casefold() for x in config["mail_aliases"])
-    identities.update(x.split(":", 1)[1].casefold() for x in account.get("proxyAddresses", []) or []
-                      if x.lower().startswith("smtp:"))
-    sent_folder = graph.get(GRAPH + "/me/mailFolders/sentitems?$select=id")["id"]
+    identities = {config["work_account"].casefold(), *(x.casefold() for x in config["mail_aliases"])}
+    owner = graph.get("/me/calendar?$select=owner")["owner"]["address"].casefold()
+    if owner not in identities:
+        raise CoverageError("The Outlook connection does not match work_account or mail_aliases.")
+    sent_folder = graph.get("/me/mailFolders/sentitems?$select=id")["id"]
     mail = {}
     cursor = start
     while cursor < end:
@@ -205,7 +131,7 @@ def collect(graph, config, start, end, today_start, today_end, notes):
     agenda = {}
     windows = [(start, end, "history"), (today_start, today_end, "today")]
     for calendar in config["calendar_ids"]:
-        path = "/me/calendarView" if calendar == "default" else f"/me/calendars/{quote(calendar, safe='')}/calendarView"
+        path = "/me/calendar/calendarView" if calendar == "default" else f"/me/calendars/{quote(calendar, safe='')}/calendarView"
         for lower, upper, purpose in windows:
             params = {"startDateTime": stamp(lower), "endDateTime": stamp(upper), "$top": 75}
             for row in reconcile(graph, f"calendar.{purpose} {calendar}", path, params, EVENT_FIELDS, notes):
@@ -226,7 +152,7 @@ def collect(graph, config, start, end, today_start, today_end, notes):
                     agenda[key] = event
     tasks = {}
     planner = config["planner"]
-    observed = stamp(dt.datetime.now(UTC))
+    observed = graph.observed
     paths = {
         "off": [],
         "assigned": [("assigned", "/me/planner/tasks")],
@@ -235,12 +161,14 @@ def collect(graph, config, start, end, today_start, today_end, notes):
     for label, path in paths:
         for row in reconcile(graph, f"planner.{label}", path, {}, None, notes):
             key = f"task:{row['id']}"
+            assignments = sorted(person["userId"] for person in row.get("_assignments", []) or [])
+            user_id = planner.get("user_id")
             tasks[key] = {
                 "id": key, "kind": "task", "date": observed, "subject": row.get("title") or "(no title)",
                 "due": row.get("dueDateTime"), "created": row.get("createdDateTime"),
                 "complete": row.get("completedDateTime"), "percent_complete": row.get("percentComplete"),
-                "plan": row.get("planId"), "assignments": sorted((row.get("assignments") or {}).keys()),
-                "assigned_to_me": account["id"] in (row.get("assignments") or {}),
+                "plan": row.get("planId"), "assignments": assignments,
+                "assigned_to_me": True if label == "assigned" else user_id in assignments if user_id else None,
                 "link": f"https://planner.cloud.microsoft/webui/plan/{quote(row['planId'], safe='')}/task/{quote(row['id'], safe='')}",
             }
     return list(mail.values()) + list(events.values()) + list(tasks.values()), list(agenda.values())

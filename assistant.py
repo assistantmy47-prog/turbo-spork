@@ -18,7 +18,8 @@ import tempfile
 import uuid
 from zoneinfo import ZoneInfo
 
-from graph import CoverageError, Graph, UTC, collect, stamp
+from graph import CoverageError, UTC, collect, stamp
+from power_automate import Replay, build_request
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_HOME = Path.home() / "Library" / "Application Support" / "Work Mail Assistant"
@@ -122,8 +123,10 @@ def settings(home):
         raise ValueError("Run init first.")
     if config["planner"]["mode"] not in {"off", "assigned", "plans"}:
         raise ValueError("Planner mode must be off, assigned or plans.")
-    if config["planner"]["mode"] == "plans" and not config["planner"]["plan_ids"]:
-        raise ValueError("Enter at least one Planner plan ID.")
+    planner = config["planner"]
+    if planner["mode"] == "plans" and (not planner["plan_ids"] or
+                                       any(not planner.get("group_ids", {}).get(plan) for plan in planner["plan_ids"])):
+        raise ValueError("Enter at least one Planner plan ID and its Microsoft 365 group ID.")
     if not config["calendar_ids"]:
         raise ValueError("Enter at least one calendar ID or default.")
     if any(config[key] < 1 for key in ("retention_months", "batch_records", "batch_chars", "body_chars")):
@@ -173,7 +176,7 @@ def batch_records(records, config):
         yield batch
 
 
-def collect_run(home, config, args, source_factory=Graph):
+def collection_window(home, config, args):
     zone = ZoneInfo(config["timezone"])
     now = dt.datetime.now(zone)
     midnight = dt.datetime.combine(now.date(), dt.time(), zone)
@@ -184,10 +187,10 @@ def collect_run(home, config, args, source_factory=Graph):
         raise ValueError("Use --from and --to together.")
     if args.recheck and not explicit:
         raise ValueError("Use --recheck with an explicit date range.")
-    identity = {key: config.get(key, "").casefold() for key in ("tenant_id", "work_account")}
+    identity = {"work_account": config["work_account"].casefold()}
     for _, earlier in runs(home):
-        if earlier["identity"] != identity:
-            raise ValueError("Use a separate --home directory when changing the tenant or work account.")
+        if earlier["identity"].get("work_account") != identity["work_account"]:
+            raise ValueError("Use a separate --home directory when changing the work account.")
     # A short overlap catches commonly delayed items. Content fingerprints prevent repeat review.
     start = (local_time(args.start, zone) if explicit else
              parse(previous[1]["end"]) - dt.timedelta(minutes=15) if previous else
@@ -206,17 +209,56 @@ def collect_run(home, config, args, source_factory=Graph):
         "coverage": [], "planner": config["planner"]["mode"], "calendars": config["calendar_ids"],
         "identity": identity,
     }
+    return manifest, (lower, upper, midnight, midnight + dt.timedelta(days=1))
+
+
+def prepare(home, config, args):
+    path = home / "pending-request.json"
+    if not config["work_account"] or "@" not in config["work_account"]:
+        raise ValueError("Set work_account in config.json.")
+    if path.exists() and not args.replace:
+        if args.start or args.end or args.recheck:
+            raise ValueError("A request is already pending. Import it first or use --replace.")
+        pending_request = load(path)
+    else:
+        manifest, window = collection_window(home, config, args)
+        request = build_request(config, manifest, window)
+        pending_request = {"manifest": manifest, "request": request, "recheck": args.recheck,
+                           "window": [value.isoformat() for value in window]}
+        save(path, pending_request)
+    request = pending_request["request"]
+    upload = home / "flow-request.json"
+    save(upload, request)
+    print(f"Upload this request to Power Automate ({len(request['feeds'])} feeds):")
+    print(upload)
+
+
+def import_export(home, config, directory):
+    path = home / "pending-request.json"
+    pending_request = load(path)
+    if not pending_request:
+        raise ValueError("Run prepare to create the export request first.")
+    manifest = pending_request["manifest"]
+    if manifest["identity"]["work_account"] != config["work_account"].casefold():
+        raise ValueError("The approved request belongs to a different work account.")
+    if (home / "runs" / manifest["run_id"] / "manifest.json").exists():
+        path.unlink()
+        (home / "flow-request.json").unlink(missing_ok=True)
+        print("This export run was already imported.")
+        return
+    explicit = not manifest["regular"]
     try:
-        records, agenda = collect(source_factory(config), config, lower, upper, midnight,
-                                  midnight + dt.timedelta(days=1), manifest["coverage"])
+        source = Replay(config, pending_request["request"], directory)
+        records, agenda = collect(source, config, *map(parse, pending_request["window"]), manifest["coverage"])
         state = review_state(home)
         queued = {fingerprint(row) for path in pending(home, state) for row in load(path)["records"]}
-        excluded = queued if args.recheck else queued | state["seen"].keys()
+        excluded = queued if pending_request["recheck"] else queued | state["seen"].keys()
         new = [row for row in records if fingerprint(row) not in excluded]
         batches = list(batch_records(new, config))
         breakdown = Counter(".".join(filter(None, (row["kind"], row.get("direction")))) for row in records)
         manifest.update({"status": "verified", "records": len(records), "batches": len(batches),
                          "by_type": dict(breakdown)})
+        run_id = manifest["run_id"]
         (home / "runs").mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(prefix=".run-", dir=home) as stage:
             directory = Path(stage) / run_id
@@ -231,9 +273,13 @@ def collect_run(home, config, args, source_factory=Graph):
             directory.rename(home / "runs" / run_id)
     except (CoverageError, ValueError, OSError, KeyError) as error:
         manifest.update({"status": "failed", "error": str(error)})
-        save(home / "failures" / f"{run_id}.json", manifest)
+        save(home / "failures" / f"{manifest['run_id']}.json", manifest)
         raise
-    print(f"Verified {len(records)} unique records, {len(batches)} new batches. Run {run_id}.")
+    path.unlink()
+    (home / "flow-request.json").unlink(missing_ok=True)
+    (home / "failures" / f"{run_id}.json").unlink(missing_ok=True)
+    print(f"Verified {len(records)} unique records, {len(batches)} new batches.")
+    print(f"Coverage report: {home / 'runs' / run_id / 'manifest.json'}")
     if not explicit:
         prune(home, config, quiet=True)
 
@@ -448,6 +494,9 @@ def brief(home, config):
     recent_failure = any(load(path)["regular"] and path.stem > manifest["run_id"] for path in failures)
     title = f"# Work brief · {today}"
     warning = []
+    request = load(home / "pending-request.json")
+    if request and request["manifest"]["regular"]:
+        warning.append("a Power Automate export is pending")
     if outstanding:
         warning.append(f"{len(outstanding)} analysis batches pending")
     if recent_failure:
@@ -499,6 +548,9 @@ def status(home):
         print(f"Coverage report: {last[0] / 'manifest.json'}")
     if latest_failure:
         print(f"Last failed attempt: {latest_failure}")
+    pending_request = load(home / "pending-request.json")
+    if pending_request:
+        print(f"Pending Power Automate export: {pending_request['request']['request_id']}")
     print(f"Pending analysis batches: {len(list(pending(home, state)))}")
     print(f"Open commitments: {sum(item['status'] == 'open' for item in state['commitments'].values())}")
 
@@ -510,10 +562,13 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("init", "status", "brief", "prune"):
         commands.add_parser(name)
-    fetch = commands.add_parser("collect")
+    fetch = commands.add_parser("prepare")
     fetch.add_argument("--from", dest="start")
     fetch.add_argument("--to", dest="end")
     fetch.add_argument("--recheck", action="store_true", help="queue previously reviewed records in an explicit range")
+    fetch.add_argument("--replace", action="store_true", help="discard the pending request and prepare a new one")
+    export_command = commands.add_parser("import-export")
+    export_command.add_argument("directory", type=Path, help="folder containing Power Automate export pages")
     next_command = commands.add_parser("next")
     next_command.add_argument("--copy", action="store_true")
     ingest = commands.add_parser("import-result")
@@ -530,8 +585,10 @@ def main():
                 initialize(home)
                 return
             config = settings(home)
-            if args.command == "collect":
-                collect_run(home, config, args)
+            if args.command == "prepare":
+                prepare(home, config, args)
+            elif args.command == "import-export":
+                import_export(home, config, args.directory.expanduser())
             elif args.command == "next":
                 next_batch(home, args.copy)
             elif args.command == "import-result":

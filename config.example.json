@@ -1,11 +1,9 @@
 {
-  "tenant_id": "",
-  "client_id": "",
   "work_account": "",
   "mail_aliases": [],
   "timezone": "America/Chicago",
   "calendar_ids": ["default"],
-  "planner": {"mode": "off", "plan_ids": []},
+  "planner": {"mode": "off", "plan_ids": [], "group_ids": {}, "user_id": ""},
   "retention_months": 12,
   "body_chars": 3500,
   "batch_chars": 18000,
