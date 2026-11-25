@@ -1,0 +1,1151 @@
+{
+  "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "$connections": {
+      "type": "Object",
+      "defaultValue": {}
+    }
+  },
+  "triggers": {
+    "Recurrence": {
+      "type": "Recurrence",
+      "recurrence": {
+        "frequency": "Day",
+        "interval": 1,
+        "timeZone": "Central Standard Time",
+        "schedule": {
+          "hours": [
+            6
+          ],
+          "minutes": [
+            0
+          ]
+        }
+      },
+      "runtimeConfiguration": {
+        "concurrency": {
+          "runs": 1
+        }
+      }
+    }
+  },
+  "actions": {
+    "Settings": {
+      "type": "Compose",
+      "inputs": {
+        "work_account": "your.name@example.com",
+        "mail_aliases": [],
+        "time_zone": "Central Standard Time",
+        "planner_mode": "off",
+        "planner_plans": [],
+        "planner_user_id": "",
+        "excerpt_chars": 360
+      },
+      "runAfter": {}
+    },
+    "Window_end": {
+      "type": "Compose",
+      "inputs": "@formatDateTime(utcNow(),'yyyy-MM-ddTHH:mm:ssZ')",
+      "runAfter": {
+        "Settings": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Read_latest_metadata": {
+      "type": "OpenApiConnection",
+      "inputs": {
+        "parameters": {
+          "path": "/WorkMailMorning/Current/WorkMailMorningInput.md"
+        },
+        "host": {
+          "apiId": "/providers/Microsoft.PowerApps/apis/shared_onedriveforbusiness",
+          "connection": "shared_onedriveforbusiness",
+          "operationId": "GetFileMetadataByPath"
+        }
+      },
+      "runAfter": {
+        "Window_end": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Read_latest_file": {
+      "type": "OpenApiConnection",
+      "inputs": {
+        "parameters": {
+          "path": "/WorkMailMorning/Current/WorkMailMorningInput.md",
+          "inferContentType": true
+        },
+        "host": {
+          "apiId": "/providers/Microsoft.PowerApps/apis/shared_onedriveforbusiness",
+          "connection": "shared_onedriveforbusiness",
+          "operationId": "GetFileContentByPath"
+        }
+      },
+      "runAfter": {
+        "Read_latest_metadata": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Read_checkpoint_line": {
+      "type": "Compose",
+      "inputs": "@trim(first(split(base64ToString(body('Read_latest_file')?['$content']),decodeUriComponent('%0A'))))",
+      "runAfter": {
+        "Read_latest_file": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Validate_checkpoint_marker": {
+      "type": "If",
+      "expression": {
+        "equals": [
+          "@and(startsWith(outputs('Read_checkpoint_line'),'checkpoint_utc='),equals(length(split(outputs('Read_checkpoint_line'),'=')),2))",
+          true
+        ]
+      },
+      "actions": {},
+      "else": {
+        "actions": {
+          "Fail_checkpoint": {
+            "type": "Terminate",
+            "inputs": {
+              "runStatus": "Failed",
+              "runError": {
+                "code": "WorkMailVerification",
+                "message": "The first line of the morning input must start with checkpoint_utc=. Restore the prior verified file or the seed."
+              }
+            },
+            "runAfter": {}
+          }
+        }
+      },
+      "runAfter": {
+        "Read_checkpoint_line": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Previous_checkpoint": {
+      "type": "Compose",
+      "inputs": "@last(split(outputs('Read_checkpoint_line'),'='))",
+      "runAfter": {
+        "Validate_checkpoint_marker": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Window_start": {
+      "type": "Compose",
+      "inputs": "@if(empty(outputs('Previous_checkpoint')),addDays(outputs('Window_end'),-1,'yyyy-MM-ddTHH:mm:ssZ'),addMinutes(outputs('Previous_checkpoint'),-15,'yyyy-MM-ddTHH:mm:ssZ'))",
+      "runAfter": {
+        "Previous_checkpoint": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Local_day": {
+      "type": "Compose",
+      "inputs": "@convertTimeZone(outputs('Window_end'),'UTC',outputs('Settings')?['time_zone'],'yyyy-MM-dd')",
+      "runAfter": {
+        "Window_start": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Calendar_start": {
+      "type": "Compose",
+      "inputs": "@convertToUtc(concat(outputs('Local_day'),'T00:00:00'),outputs('Settings')?['time_zone'],'yyyy-MM-ddTHH:mm:ssZ')",
+      "runAfter": {
+        "Local_day": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Calendar_end": {
+      "type": "Compose",
+      "inputs": "@convertToUtc(addDays(concat(outputs('Local_day'),'T00:00:00'),1,'yyyy-MM-ddTHH:mm:ss'),outputs('Settings')?['time_zone'],'yyyy-MM-ddTHH:mm:ssZ')",
+      "runAfter": {
+        "Calendar_start": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Mail_received_query": {
+      "type": "Compose",
+      "inputs": "@concat('https://graph.microsoft.com/v1.0/me/messages?$top=75&$filter=',uriComponent(concat('receivedDateTime ge ',outputs('Window_start'),' and receivedDateTime lt ',outputs('Window_end'))))",
+      "runAfter": {
+        "Calendar_end": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Mail_sent_query": {
+      "type": "Compose",
+      "inputs": "@concat('https://graph.microsoft.com/v1.0/me/messages?$top=75&$filter=',uriComponent(concat('sentDateTime ge ',outputs('Window_start'),' and sentDateTime lt ',outputs('Window_end'))))",
+      "runAfter": {
+        "Mail_received_query": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Calendar_query": {
+      "type": "Compose",
+      "inputs": "@concat('https://graph.microsoft.com/v1.0/me/calendar/calendarView?$top=75&startDateTime=',uriComponent(outputs('Calendar_start')),'&endDateTime=',uriComponent(outputs('Calendar_end')))",
+      "runAfter": {
+        "Mail_sent_query": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Read_calendar_owner": {
+      "type": "OpenApiConnection",
+      "inputs": {
+        "parameters": {
+          "Uri": "https://graph.microsoft.com/v1.0/me/calendar?$select=owner",
+          "Method": "GET",
+          "CustomHeader1": "Prefer: IdType=\"ImmutableId\", outlook.body-content-type=\"text\", outlook.timezone=\"UTC\""
+        },
+        "host": {
+          "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365",
+          "connection": "shared_office365",
+          "operationId": "HttpRequest"
+        }
+      },
+      "runAfter": {
+        "Calendar_query": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Read_sent_folder": {
+      "type": "OpenApiConnection",
+      "inputs": {
+        "parameters": {
+          "Uri": "https://graph.microsoft.com/v1.0/me/mailFolders/sentitems?$select=id",
+          "Method": "GET",
+          "CustomHeader1": "Prefer: IdType=\"ImmutableId\", outlook.body-content-type=\"text\", outlook.timezone=\"UTC\""
+        },
+        "host": {
+          "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365",
+          "connection": "shared_office365",
+          "operationId": "HttpRequest"
+        }
+      },
+      "runAfter": {
+        "Read_calendar_owner": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Sent_folder_id": {
+      "type": "Compose",
+      "inputs": "@json(string(body('Read_sent_folder')))?['id']",
+      "runAfter": {
+        "Read_sent_folder": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Known_addresses": {
+      "type": "Compose",
+      "inputs": "@union(createArray(toLower(outputs('Settings')?['work_account'])),outputs('Settings')?['mail_aliases'])",
+      "runAfter": {
+        "Sent_folder_id": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Validate_setup": {
+      "type": "If",
+      "expression": {
+        "equals": [
+          "@and(contains(outputs('Known_addresses'),toLower(coalesce(json(string(body('Read_calendar_owner')))?['owner']?['address'],''))),not(empty(outputs('Sent_folder_id'))),less(ticks(outputs('Window_start')),ticks(outputs('Window_end'))),or(empty(outputs('Previous_checkpoint')),less(ticks(if(empty(outputs('Previous_checkpoint')),outputs('Window_start'),outputs('Previous_checkpoint'))),ticks(outputs('Window_end')))),contains(createArray('off','assigned','plans'),outputs('Settings')?['planner_mode']),or(not(equals(outputs('Settings')?['planner_mode'],'plans')),not(empty(outputs('Settings')?['planner_plans']))),greater(outputs('Settings')?['excerpt_chars'],0),lessOrEquals(outputs('Settings')?['excerpt_chars'],1000))",
+          true
+        ]
+      },
+      "actions": {},
+      "else": {
+        "actions": {
+          "Fail_setup": {
+            "type": "Terminate",
+            "inputs": {
+              "runStatus": "Failed",
+              "runError": {
+                "code": "WorkMailVerification",
+                "message": "Check the Outlook identity, time window, Planner settings, and excerpt length."
+              }
+            },
+            "runAfter": {}
+          }
+        }
+      },
+      "runAfter": {
+        "Known_addresses": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Build_plan_feeds": {
+      "type": "Select",
+      "inputs": {
+        "from": "@outputs('Settings')?['planner_plans']",
+        "select": {
+          "key": "@concat('planner-',item()?['plan_id'])",
+          "kind": "plan",
+          "group_id": "@item()?['group_id']",
+          "plan_id": "@item()?['plan_id']",
+          "full_url": "planner",
+          "check_url": "planner"
+        }
+      },
+      "runAfter": {
+        "Validate_setup": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Build_feeds": {
+      "type": "Compose",
+      "inputs": "@union(createArray(setProperty(setProperty(json('{\"key\":\"received\",\"kind\":\"outlook\"}'),'full_url',concat(outputs('Mail_received_query'),'&$select=','id,subject,from,sender,toRecipients,ccRecipients,bodyPreview,uniqueBody,receivedDateTime,sentDateTime,isDraft,conversationId,internetMessageId,parentFolderId,webLink,importance,hasAttachments')),'check_url',concat(outputs('Mail_received_query'),'&$select=id')),setProperty(setProperty(json('{\"key\":\"sent\",\"kind\":\"outlook\"}'),'full_url',concat(outputs('Mail_sent_query'),'&$select=','id,subject,from,sender,toRecipients,ccRecipients,bodyPreview,uniqueBody,receivedDateTime,sentDateTime,isDraft,conversationId,internetMessageId,parentFolderId,webLink,importance,hasAttachments')),'check_url',concat(outputs('Mail_sent_query'),'&$select=id')),setProperty(setProperty(json('{\"key\":\"calendar\",\"kind\":\"outlook\"}'),'full_url',concat(outputs('Calendar_query'),'&$select=','id,subject,start,end,isAllDay,isCancelled,responseStatus,organizer,webLink,location,bodyPreview,body,showAs,iCalUId,isOrganizer')),'check_url',concat(outputs('Calendar_query'),'&$select=id'))),if(equals(outputs('Settings')?['planner_mode'],'assigned'),createArray(json('{\"key\":\"planner-assigned\",\"kind\":\"assigned\",\"full_url\":\"planner\",\"check_url\":\"planner\"}')),if(equals(outputs('Settings')?['planner_mode'],'plans'),body('Build_plan_feeds'),json('[]'))))",
+      "runAfter": {
+        "Build_plan_feeds": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Init_Next_page": {
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "Next_page",
+            "type": "string",
+            "value": ""
+          }
+        ]
+      },
+      "runAfter": {
+        "Build_feeds": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Init_Page_ok": {
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "Page_ok",
+            "type": "boolean",
+            "value": false
+          }
+        ]
+      },
+      "runAfter": {
+        "Init_Next_page": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Init_Page_body": {
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "Page_body",
+            "type": "object",
+            "value": "@json('{}')"
+          }
+        ]
+      },
+      "runAfter": {
+        "Init_Page_ok": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Init_Scan_ids": {
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "Scan_ids",
+            "type": "array",
+            "value": "@json('[]')"
+          }
+        ]
+      },
+      "runAfter": {
+        "Init_Page_body": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Init_Scan_rows": {
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "Scan_rows",
+            "type": "array",
+            "value": "@json('[]')"
+          }
+        ]
+      },
+      "runAfter": {
+        "Init_Scan_ids": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Init_Scan_count": {
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "Scan_count",
+            "type": "integer",
+            "value": 0
+          }
+        ]
+      },
+      "runAfter": {
+        "Init_Scan_rows": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Init_Scan_pages": {
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "Scan_pages",
+            "type": "integer",
+            "value": 0
+          }
+        ]
+      },
+      "runAfter": {
+        "Init_Scan_count": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Init_Feed_passes": {
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "Feed_passes",
+            "type": "array",
+            "value": "@json('[]')"
+          }
+        ]
+      },
+      "runAfter": {
+        "Init_Scan_pages": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Init_Verified_feeds": {
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "Verified_feeds",
+            "type": "array",
+            "value": "@json('[]')"
+          }
+        ]
+      },
+      "runAfter": {
+        "Init_Feed_passes": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Init_Morning_groups": {
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "Morning_groups",
+            "type": "array",
+            "value": "@json('[]')"
+          }
+        ]
+      },
+      "runAfter": {
+        "Init_Verified_feeds": [
+          "Succeeded"
+        ]
+      }
+    },
+    "For_each_feed": {
+      "type": "Foreach",
+      "foreach": "@outputs('Build_feeds')",
+      "actions": {
+        "Reset_feed_passes": {
+          "type": "SetVariable",
+          "inputs": {
+            "name": "Feed_passes",
+            "value": "@json('[]')"
+          },
+          "runAfter": {}
+        },
+        "For_each_pass": {
+          "type": "Foreach",
+          "foreach": "@createArray('content','verification')",
+          "actions": {
+            "Set_first_page": {
+              "type": "SetVariable",
+              "inputs": {
+                "name": "Next_page",
+                "value": "@if(equals(items('For_each_pass'),'content'),items('For_each_feed')?['full_url'],items('For_each_feed')?['check_url'])"
+              },
+              "runAfter": {}
+            },
+            "Reset_scan_ids": {
+              "type": "SetVariable",
+              "inputs": {
+                "name": "Scan_ids",
+                "value": "@json('[]')"
+              },
+              "runAfter": {
+                "Set_first_page": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Reset_scan_rows": {
+              "type": "SetVariable",
+              "inputs": {
+                "name": "Scan_rows",
+                "value": "@json('[]')"
+              },
+              "runAfter": {
+                "Reset_scan_ids": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Reset_scan_count": {
+              "type": "SetVariable",
+              "inputs": {
+                "name": "Scan_count",
+                "value": 0
+              },
+              "runAfter": {
+                "Reset_scan_rows": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Reset_scan_pages": {
+              "type": "SetVariable",
+              "inputs": {
+                "name": "Scan_pages",
+                "value": 0
+              },
+              "runAfter": {
+                "Reset_scan_count": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Reset_scan_page_ok": {
+              "type": "SetVariable",
+              "inputs": {
+                "name": "Page_ok",
+                "value": false
+              },
+              "runAfter": {
+                "Reset_scan_pages": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Read_pages": {
+              "type": "Until",
+              "expression": "@or(empty(variables('Next_page')),not(variables('Page_ok')))",
+              "limit": {
+                "count": 1000,
+                "timeout": "PT1H"
+              },
+              "actions": {
+                "Current_page": {
+                  "type": "Compose",
+                  "inputs": "@variables('Next_page')",
+                  "runAfter": {}
+                },
+                "Reset_page_ok": {
+                  "type": "SetVariable",
+                  "inputs": {
+                    "name": "Page_ok",
+                    "value": false
+                  },
+                  "runAfter": {
+                    "Current_page": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Clear_page_body": {
+                  "type": "SetVariable",
+                  "inputs": {
+                    "name": "Page_body",
+                    "value": "@json('{}')"
+                  },
+                  "runAfter": {
+                    "Reset_page_ok": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Read_source": {
+                  "type": "Switch",
+                  "expression": "@items('For_each_feed')?['kind']",
+                  "cases": {
+                    "Outlook": {
+                      "case": "outlook",
+                      "actions": {
+                        "Read_Outlook": {
+                          "type": "OpenApiConnection",
+                          "inputs": {
+                            "parameters": {
+                              "Uri": "@outputs('Current_page')",
+                              "Method": "GET",
+                              "CustomHeader1": "Prefer: IdType=\"ImmutableId\", outlook.body-content-type=\"text\", outlook.timezone=\"UTC\""
+                            },
+                            "host": {
+                              "apiId": "/providers/Microsoft.PowerApps/apis/shared_office365",
+                              "connection": "shared_office365",
+                              "operationId": "HttpRequest"
+                            }
+                          },
+                          "runAfter": {}
+                        },
+                        "Save_Outlook_body": {
+                          "type": "SetVariable",
+                          "inputs": {
+                            "name": "Page_body",
+                            "value": "@json(string(body('Read_Outlook')))"
+                          },
+                          "runAfter": {
+                            "Read_Outlook": [
+                              "Succeeded"
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    "Assigned": {
+                      "case": "assigned",
+                      "actions": {
+                        "Read_assigned": {
+                          "type": "OpenApiConnection",
+                          "inputs": {
+                            "parameters": {},
+                            "host": {
+                              "apiId": "/providers/Microsoft.PowerApps/apis/shared_planner",
+                              "connection": "shared_planner",
+                              "operationId": "ListMyTasks_V2"
+                            }
+                          },
+                          "runAfter": {}
+                        },
+                        "Save_assigned_body": {
+                          "type": "SetVariable",
+                          "inputs": {
+                            "name": "Page_body",
+                            "value": "@body('Read_assigned')"
+                          },
+                          "runAfter": {
+                            "Read_assigned": [
+                              "Succeeded"
+                            ]
+                          }
+                        }
+                      }
+                    },
+                    "Plan": {
+                      "case": "plan",
+                      "actions": {
+                        "Read_plan": {
+                          "type": "OpenApiConnection",
+                          "inputs": {
+                            "parameters": {
+                              "groupId": "@items('For_each_feed')?['group_id']",
+                              "id": "@items('For_each_feed')?['plan_id']"
+                            },
+                            "host": {
+                              "apiId": "/providers/Microsoft.PowerApps/apis/shared_planner",
+                              "connection": "shared_planner",
+                              "operationId": "ListTasks_V3"
+                            }
+                          },
+                          "runAfter": {}
+                        },
+                        "Save_plan_body": {
+                          "type": "SetVariable",
+                          "inputs": {
+                            "name": "Page_body",
+                            "value": "@body('Read_plan')"
+                          },
+                          "runAfter": {
+                            "Read_plan": [
+                              "Succeeded"
+                            ]
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "default": {
+                    "actions": {}
+                  },
+                  "runAfter": {
+                    "Clear_page_body": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Check_page_shape": {
+                  "type": "ParseJson",
+                  "inputs": {
+                    "content": "@variables('Page_body')",
+                    "schema": {
+                      "type": "object",
+                      "required": [
+                        "value"
+                      ],
+                      "properties": {
+                        "value": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "required": [
+                              "id"
+                            ],
+                            "properties": {
+                              "id": {
+                                "type": "string",
+                                "minLength": 1
+                              }
+                            }
+                          }
+                        },
+                        "@odata.nextLink": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "not": {
+                        "required": [
+                          "error"
+                        ]
+                      }
+                    }
+                  },
+                  "runAfter": {
+                    "Read_source": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Select_page_ids": {
+                  "type": "Select",
+                  "inputs": {
+                    "from": "@body('Check_page_shape')?['value']",
+                    "select": {
+                      "id": "@item()?['id']"
+                    }
+                  },
+                  "runAfter": {
+                    "Check_page_shape": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Merge_page_ids": {
+                  "type": "Compose",
+                  "inputs": "@union(variables('Scan_ids'),body('Select_page_ids'))",
+                  "runAfter": {
+                    "Select_page_ids": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Set_scan_ids": {
+                  "type": "SetVariable",
+                  "inputs": {
+                    "name": "Scan_ids",
+                    "value": "@outputs('Merge_page_ids')"
+                  },
+                  "runAfter": {
+                    "Merge_page_ids": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Count_page_records": {
+                  "type": "IncrementVariable",
+                  "inputs": {
+                    "name": "Scan_count",
+                    "value": "@length(body('Select_page_ids'))"
+                  },
+                  "runAfter": {
+                    "Set_scan_ids": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Merge_page_rows": {
+                  "type": "Compose",
+                  "inputs": "@if(equals(items('For_each_pass'),'content'),union(variables('Scan_rows'),body('Check_page_shape')?['value']),variables('Scan_rows'))",
+                  "runAfter": {
+                    "Count_page_records": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Set_scan_rows": {
+                  "type": "SetVariable",
+                  "inputs": {
+                    "name": "Scan_rows",
+                    "value": "@outputs('Merge_page_rows')"
+                  },
+                  "runAfter": {
+                    "Merge_page_rows": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Count_page": {
+                  "type": "IncrementVariable",
+                  "inputs": {
+                    "name": "Scan_pages",
+                    "value": 1
+                  },
+                  "runAfter": {
+                    "Set_scan_rows": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Continuation": {
+                  "type": "Compose",
+                  "inputs": "@coalesce(body('Check_page_shape')?['@odata.nextLink'],'')",
+                  "runAfter": {
+                    "Count_page": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Save_continuation": {
+                  "type": "SetVariable",
+                  "inputs": {
+                    "name": "Next_page",
+                    "value": "@outputs('Continuation')"
+                  },
+                  "runAfter": {
+                    "Continuation": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Mark_page_result": {
+                  "type": "SetVariable",
+                  "inputs": {
+                    "name": "Page_ok",
+                    "value": "@or(empty(outputs('Continuation')),and(equals(items('For_each_feed')?['kind'],'outlook'),startsWith(toLower(outputs('Continuation')),'https://graph.microsoft.com/v1.0/me/'),not(equals(outputs('Continuation'),outputs('Current_page')))))"
+                  },
+                  "runAfter": {
+                    "Save_continuation": [
+                      "Succeeded"
+                    ]
+                  }
+                }
+              },
+              "runAfter": {
+                "Reset_scan_page_ok": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Save_complete_scan": {
+              "type": "If",
+              "expression": {
+                "equals": [
+                  "@and(variables('Page_ok'),empty(variables('Next_page')),greater(variables('Scan_pages'),0),equals(variables('Scan_count'),length(variables('Scan_ids'))))",
+                  true
+                ]
+              },
+              "actions": {
+                "Append_complete_scan": {
+                  "type": "AppendToArrayVariable",
+                  "inputs": {
+                    "name": "Feed_passes",
+                    "value": "@setProperty(setProperty(setProperty(setProperty(json('{}'),'ids',variables('Scan_ids')),'rows',variables('Scan_rows')),'count',variables('Scan_count')),'pages',variables('Scan_pages'))"
+                  },
+                  "runAfter": {}
+                }
+              },
+              "else": {
+                "actions": {}
+              },
+              "runAfter": {
+                "Read_pages": [
+                  "Succeeded"
+                ]
+              }
+            }
+          },
+          "runAfter": {
+            "Reset_feed_passes": [
+              "Succeeded"
+            ]
+          }
+        },
+        "Has_two_complete_scans": {
+          "type": "If",
+          "expression": {
+            "equals": [
+              "@equals(length(variables('Feed_passes')),2)",
+              true
+            ]
+          },
+          "actions": {
+            "Full_scan": {
+              "type": "Compose",
+              "inputs": "@first(variables('Feed_passes'))",
+              "runAfter": {}
+            },
+            "Audit_scan": {
+              "type": "Compose",
+              "inputs": "@last(variables('Feed_passes'))",
+              "runAfter": {
+                "Full_scan": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Compare_id_sets": {
+              "type": "If",
+              "expression": {
+                "equals": [
+                  "@and(equals(length(outputs('Full_scan')?['ids']),length(outputs('Audit_scan')?['ids'])),equals(length(outputs('Full_scan')?['ids']),length(intersection(outputs('Full_scan')?['ids'],outputs('Audit_scan')?['ids']))))",
+                  true
+                ]
+              },
+              "actions": {
+                "Keep_verified_feed": {
+                  "type": "AppendToArrayVariable",
+                  "inputs": {
+                    "name": "Verified_feeds",
+                    "value": "@setProperty(setProperty(setProperty(setProperty(setProperty(json('{}'),'feed',items('For_each_feed')?['key']),'verified_count',length(outputs('Full_scan')?['ids'])),'content_pages',outputs('Full_scan')?['pages']),'verification_pages',outputs('Audit_scan')?['pages']),'records',outputs('Full_scan')?['rows'])"
+                  },
+                  "runAfter": {}
+                },
+                "Filter_morning_rows": {
+                  "type": "Query",
+                  "inputs": {
+                    "from": "@outputs('Full_scan')?['rows']",
+                    "where": "@if(contains(createArray('received','sent'),items('For_each_feed')?['key']),and(not(equals(item()?['isDraft'],true)),if(equals(items('For_each_feed')?['key'],'sent'),or(equals(item()?['parentFolderId'],outputs('Sent_folder_id')),contains(outputs('Known_addresses'),toLower(coalesce(item()?['from']?['emailAddress']?['address'],''))),contains(outputs('Known_addresses'),toLower(coalesce(item()?['sender']?['emailAddress']?['address'],'')))),not(equals(item()?['parentFolderId'],outputs('Sent_folder_id'))))),if(equals(items('For_each_feed')?['key'],'calendar'),and(not(equals(item()?['isCancelled'],true)),not(equals(item()?['responseStatus']?['response'],'declined'))),true))"
+                  },
+                  "runAfter": {
+                    "Keep_verified_feed": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Project_morning_rows": {
+                  "type": "Select",
+                  "inputs": {
+                    "from": "@body('Filter_morning_rows')",
+                    "select": {
+                      "id": "@item()?['id']",
+                      "subject": "@coalesce(item()?['subject'],item()?['title'],'(no subject)')",
+                      "from": "@coalesce(item()?['from']?['emailAddress']?['address'],item()?['organizer']?['emailAddress']?['address'],'')",
+                      "to": "@if(contains(createArray('received','sent'),items('For_each_feed')?['key']),coalesce(item()?['toRecipients'],json('[]')),null)",
+                      "when": "@if(equals(items('For_each_feed')?['key'],'calendar'),item()?['start']?['dateTime'],if(equals(items('For_each_feed')?['key'],'sent'),item()?['sentDateTime'],item()?['receivedDateTime']))",
+                      "end": "@item()?['end']?['dateTime']",
+                      "all_day": "@item()?['isAllDay']",
+                      "due": "@item()?['dueDateTime']",
+                      "percent_complete": "@item()?['percentComplete']",
+                      "assignments": "@coalesce(item()?['_assignments'],item()?['assignments'])",
+                      "assigned_to_me": "@if(equals(items('For_each_feed')?['kind'],'outlook'),null,if(equals(items('For_each_feed')?['kind'],'assigned'),true,if(empty(outputs('Settings')?['planner_user_id']),null,or(contains(coalesce(item()?['assignments'],json('{}')),outputs('Settings')?['planner_user_id']),contains(string(coalesce(item()?['_assignments'],json('[]'))),concat('\"userId\":\"',outputs('Settings')?['planner_user_id'],'\"'))))))",
+                      "thread": "@item()?['conversationId']",
+                      "message_type": "@item()?['@odata.type']",
+                      "importance": "@item()?['importance']",
+                      "link": "@if(equals(items('For_each_feed')?['kind'],'outlook'),coalesce(item()?['webLink'],''),concat('https://planner.cloud.microsoft/webui/plan/',uriComponent(coalesce(item()?['planId'],'')),'/task/',uriComponent(item()?['id'])))",
+                      "excerpt": "@take(coalesce(item()?['bodyPreview'],item()?['body']?['content'],''),outputs('Settings')?['excerpt_chars'])",
+                      "excerpt_truncated": "@greater(length(coalesce(item()?['bodyPreview'],item()?['body']?['content'],'')),outputs('Settings')?['excerpt_chars'])"
+                    }
+                  },
+                  "runAfter": {
+                    "Filter_morning_rows": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Keep_morning_group": {
+                  "type": "AppendToArrayVariable",
+                  "inputs": {
+                    "name": "Morning_groups",
+                    "value": "@setProperty(setProperty(setProperty(json('{}'),'feed',items('For_each_feed')?['key']),'verified_count',length(outputs('Full_scan')?['ids'])),'records',body('Project_morning_rows'))"
+                  },
+                  "runAfter": {
+                    "Project_morning_rows": [
+                      "Succeeded"
+                    ]
+                  }
+                }
+              },
+              "else": {
+                "actions": {}
+              },
+              "runAfter": {
+                "Audit_scan": [
+                  "Succeeded"
+                ]
+              }
+            }
+          },
+          "else": {
+            "actions": {}
+          },
+          "runAfter": {
+            "For_each_pass": [
+              "Succeeded"
+            ]
+          }
+        }
+      },
+      "runAfter": {
+        "Init_Morning_groups": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Publish_only_if_verified": {
+      "type": "If",
+      "expression": {
+        "equals": [
+          "@and(equals(length(variables('Verified_feeds')),length(outputs('Build_feeds'))),equals(length(variables('Morning_groups')),length(outputs('Build_feeds'))))",
+          true
+        ]
+      },
+      "actions": {
+        "Coverage_counts": {
+          "type": "Select",
+          "inputs": {
+            "from": "@variables('Verified_feeds')",
+            "select": {
+              "feed": "@item()?['feed']",
+              "records": "@item()?['verified_count']",
+              "content_pages": "@item()?['content_pages']",
+              "verification_pages": "@item()?['verification_pages']"
+            }
+          },
+          "runAfter": {}
+        },
+        "Run_metadata": {
+          "type": "Compose",
+          "inputs": "@setProperty(setProperty(setProperty(setProperty(setProperty(setProperty(setProperty(setProperty(json('{}'),'status','verified'),'window_start_utc',outputs('Window_start')),'checkpoint_utc',outputs('Window_end')),'local_day',outputs('Local_day')),'time_zone',outputs('Settings')?['time_zone']),'planner_mode',outputs('Settings')?['planner_mode']),'work_account',outputs('Settings')?['work_account']),'mail_aliases',outputs('Settings')?['mail_aliases'])",
+          "runAfter": {
+            "Coverage_counts": [
+              "Succeeded"
+            ]
+          }
+        },
+        "Archive_name": {
+          "type": "Compose",
+          "inputs": "@concat('verified-',formatDateTime(outputs('Window_end'),'yyyyMMddTHHmmssZ'),'-',workflow()?['run']?['name'],'.json')",
+          "runAfter": {
+            "Run_metadata": [
+              "Succeeded"
+            ]
+          }
+        },
+        "Create_verified_archive": {
+          "type": "OpenApiConnection",
+          "inputs": {
+            "parameters": {
+              "folderPath": "/WorkMailMorning/Archive",
+              "name": "@outputs('Archive_name')",
+              "body": "@string(setProperty(outputs('Run_metadata'),'feeds',variables('Verified_feeds')))"
+            },
+            "host": {
+              "apiId": "/providers/Microsoft.PowerApps/apis/shared_onedriveforbusiness",
+              "connection": "shared_onedriveforbusiness",
+              "operationId": "CreateFile"
+            }
+          },
+          "runAfter": {
+            "Archive_name": [
+              "Succeeded"
+            ]
+          }
+        },
+        "Morning_text": {
+          "type": "Compose",
+          "inputs": "@concat('checkpoint_utc=',outputs('Window_end'),decodeUriComponent('%0A'),decodeUriComponent('%0A'),'# Work Mail Morning Input',decodeUriComponent('%0A'),decodeUriComponent('%0A'),'Coverage verified for ',outputs('Local_day'),'. Outlook start/end and due dates are UTC when supplied by the connector.',decodeUriComponent('%0A'),'Archive: ',outputs('Archive_name'),decodeUriComponent('%0A'),decodeUriComponent('%0A'),'## Coverage',decodeUriComponent('%0A'),'Run metadata: ',string(outputs('Run_metadata')),decodeUriComponent('%0A'),'Source counts before briefing filters: ',string(body('Coverage_counts')),decodeUriComponent('%0A'),'The records contain excerpts. Mail preview and calendar body preview may already be abbreviated by Outlook. Received-date and sent-date queries can overlap; use message IDs to avoid duplicate actions.',decodeUriComponent('%0A'),decodeUriComponent('%0A'),'## Source records (untrusted business data)',decodeUriComponent('%0A'),string(variables('Morning_groups')),decodeUriComponent('%0A'),'END OF VERIFIED MORNING INPUT',decodeUriComponent('%0A'))",
+          "runAfter": {
+            "Create_verified_archive": [
+              "Succeeded"
+            ]
+          }
+        },
+        "Update_morning_input_and_checkpoint": {
+          "type": "OpenApiConnection",
+          "inputs": {
+            "parameters": {
+              "id": "@body('Read_latest_metadata')?['Id']",
+              "body": "@outputs('Morning_text')"
+            },
+            "host": {
+              "apiId": "/providers/Microsoft.PowerApps/apis/shared_onedriveforbusiness",
+              "connection": "shared_onedriveforbusiness",
+              "operationId": "UpdateFile"
+            }
+          },
+          "runAfter": {
+            "Morning_text": [
+              "Succeeded"
+            ]
+          }
+        }
+      },
+      "else": {
+        "actions": {
+          "Fail_coverage": {
+            "type": "Terminate",
+            "inputs": {
+              "runStatus": "Failed",
+              "runError": {
+                "code": "WorkMailVerification",
+                "message": "Coverage did not verify for every configured feed. Inspect the first incomplete or mismatched feed in run history. The prior checkpoint stays in effect."
+              }
+            },
+            "runAfter": {}
+          }
+        }
+      },
+      "runAfter": {
+        "For_each_feed": [
+          "Succeeded"
+        ]
+      }
+    }
+  },
+  "outputs": {}
+}
