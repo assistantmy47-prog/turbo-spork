@@ -1,0 +1,433 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<title>Work Mail Review</title>
+<style>
+* { box-sizing: border-box }
+body { margin: 0; background: #f1f5f7; color: #152c39; font: 16px/1.55 system-ui, sans-serif }
+main { width: min(780px, calc(100% - 32px)); margin: 32px auto 56px }
+h1 { font-size: 2.15rem; line-height: 1.12; margin: 0 }
+h2 { margin: 0 0 10px; font-size: 1.25rem }
+p { margin: 0 0 13px }
+header { margin-bottom: 24px }
+header p { margin-top: 8px; color: #455d69 }
+section { background: white; border: 1px solid #cad8dd; border-radius: 14px; padding: 20px; margin: 14px 0 }
+label { display: block; margin: 12px 0 }
+label input[type=file] { display: block; max-width: 100%; margin-top: 4px }
+input[type=number] { width: 64px }
+textarea { width: 100%; min-height: 105px; padding: 9px; font: 14px monospace }
+button { font: inherit; padding: 6px 13px; background: #e7f1f3; color: #133f4b; border: 1px solid #91aeb8; border-radius: 7px; cursor: pointer; margin: 3px 6px 3px 0 }
+button.primary { background: #164d55; color: white }
+button:disabled { opacity: .5; cursor: default }
+button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px solid #176b88; outline-offset: 2px }
+ul { padding-left: 24px }
+.output { margin-top: 10px; overflow-wrap: anywhere }
+.error { color: #9b2828 }
+[hidden] { display: none !important }
+</style>
+</head>
+<body>
+<main>
+<header><h1>Work Mail Review</h1><p>Prepare email batches, verify Copilot’s replies, and assemble the morning brief input. This page processes selected files locally.</p></header>
+<section>
+  <h2>1. Prepare the review</h2>
+  <label>Current verified archive <input id="archive" type="file" accept=".json"></label>
+  <label>Earlier archives or monthly history files (optional) <input id="history" type="file" accept=".json,.gz,.jsonl" multiple></label>
+  <label>Routing rules and confirmed decisions (optional) <input id="settings" type="file" accept=".json"></label>
+  <label>Maximum emails per batch <input id="size" type="number" value="10" min="1" max="20"></label>
+  <label><input id="apply" type="checkbox"> Apply routing and exclude matched emails from Copilot review</label>
+  <button class="primary" id="prepare">Prepare batches</button>
+  <div id="prepared" class="output" role="status" aria-live="polite"></div>
+  <div id="downloads"></div>
+</section>
+<section>
+  <h2>2. Reconcile Copilot’s results</h2>
+  <p>Paste the JSON response or choose result files. You can add results one batch at a time.</p>
+  <label>Copilot JSON response <textarea id="response" spellcheck="false"></textarea></label>
+  <label>Copilot result files <input id="results" type="file" accept=".json,.txt" multiple></label>
+  <button class="primary" id="reconcile" disabled>Check results</button>
+  <div id="coverage" class="output" role="status" aria-live="polite"></div>
+</section>
+<section>
+  <h2>3. Prepare the brief</h2>
+  <p>Download the verified brief input and attach it to the same Copilot agent.</p>
+  <button id="brief" disabled>Download brief input</button>
+</section>
+</main>
+<script>
+'use strict';
+
+const actions = new Set(['provide_information', 'approve_reject', 'execute', 'investigate', 'no_action']);
+const statuses = new Set(['open', 'waiting', 'closed']);
+const mailFeeds = new Set(['received', 'sent']);
+const clean = value => typeof value === 'string' ? value.trim() : '';
+const lower = value => clean(value).toLowerCase();
+const short = (value, limit = 750) => clean(value).slice(0, limit);
+const address = person => clean(person?.emailAddress?.address ?? person);
+const terms = value => [...new Set((lower(value).match(/[a-z0-9][a-z0-9-]{3,}/g) || [])
+    .filter(term => !['that', 'this', 'with', 'from', 'your', 'please', 'email', 'about'].includes(term)))];
+const matchesReference = (text, reference) => text.toLowerCase().includes(reference.toLowerCase());
+
+function requireValue(condition, message) {
+    if (!condition) throw new Error(message);
+}
+function checkArchive(archive) {
+    requireValue(archive?.status === 'verified' && clean(archive.checkpoint_utc) && Array.isArray(archive.feeds),
+        'Choose a verified JSON archive from the scheduled flow.');
+    const keys = new Set();
+    for (const feed of archive.feeds) {
+        requireValue(clean(feed.feed) && !keys.has(feed.feed) && Array.isArray(feed.records),
+            'The archive contains a duplicate feed or an invalid records array.');
+        keys.add(feed.feed);
+        const ids = new Set(feed.records.map(record => record?.id));
+        requireValue(ids.size === feed.records.length && ids.size === feed.verified_count &&
+            [...ids].every(id => clean(id)),
+            'The recorded coverage does not match the message IDs in feed ' + feed.feed + '.');
+    }
+    requireValue(keys.has('received') && keys.has('sent'), 'The archive must contain the received and sent feeds.');
+    return archive;
+}
+function readMail(archive) {
+    const messages = new Map();
+    const accounts = new Set([archive.work_account, ...(archive.mail_aliases || [])].map(lower).filter(Boolean));
+    for (const feed of archive.feeds.filter(feed => mailFeeds.has(feed.feed))) {
+        for (const record of feed.records) {
+            if (record.isDraft === true) continue;
+            if (messages.has(record.id)) {
+                messages.get(record.id).query_feeds.push(feed.feed);
+                continue;
+            }
+            const from = address(record.from);
+            const sender = address(record.sender);
+            const self = accounts.has(lower(from)) || accounts.has(lower(sender));
+            messages.set(record.id, {
+                id: record.id, thread_id: clean(record.conversationId), from, sender,
+                to: (record.toRecipients || []).map(address).filter(Boolean).slice(0, 12),
+                query_feeds: [feed.feed],
+                direction: self ? 'sent' : (accounts.size && (from || sender) ? 'received' : 'unknown'),
+                date: clean(self ? record.sentDateTime || record.receivedDateTime : record.receivedDateTime || record.sentDateTime),
+                subject: short(record.subject, 240), excerpt: short(record.uniqueBody?.content || record.bodyPreview),
+                excerpt_limited: true, link: clean(record.webLink), has_attachments: record.hasAttachments === true
+            });
+        }
+    }
+    return [...messages.values()].sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
+}
+function parseSettings(value = {}) {
+    requireValue(value && Array.isArray(value.rules ?? []) && Array.isArray(value.decisions ?? []),
+        'Settings must contain rules and decisions arrays.');
+    const ids = new Set();
+    const rules = (value.rules || []).map(rule => {
+        requireValue(clean(rule?.id) && !ids.has(rule.id) && clean(rule.destination) &&
+            lower(rule.sender).includes('@') && clean(rule.subject_contains) &&
+            Array.isArray(rule.except_subject_contains ?? []) &&
+            (rule.except_subject_contains || []).every(part => clean(part)) &&
+            (rule.enabled === undefined || typeof rule.enabled === 'boolean'),
+            'Each rule needs a unique ID, an exact sender, subject text and a destination.');
+        ids.add(rule.id);
+        return rule;
+    });
+    const decisionIds = new Set();
+    const decisions = (value.decisions || []).map(decision => {
+        requireValue(clean(decision?.id) && !decisionIds.has(decision.id) && clean(decision.action_taken) &&
+            clean(decision.source_link) && Array.isArray(decision.references) &&
+            decision.references.length > 0 && decision.references.every(reference => clean(reference)),
+            'Each confirmed decision needs a unique ID, reference terms, action taken and source link.');
+        decisionIds.add(decision.id);
+        return {
+            id: decision.id, references: decision.references, date: clean(decision.date),
+            topic: short(decision.topic, 160), action_taken: short(decision.action_taken, 450),
+            outcome: short(decision.outcome, 320), source_link: clean(decision.source_link)
+        };
+    });
+    return { rules, decisions };
+}
+function routeMessage(message, rules) {
+    if (message.direction !== 'received') return null;
+    return rules.find(rule => rule.enabled !== false && lower(message.from) === lower(rule.sender) &&
+        lower(message.subject).includes(lower(rule.subject_contains)) &&
+        !(rule.except_subject_contains || []).some(part => lower(message.subject).includes(lower(part)))) || null;
+}
+function contextFrom(archive) {
+    return {
+        calendar: archive.feeds.filter(feed => feed.feed === 'calendar').flatMap(feed =>
+            feed.records.filter(event => !event.isCancelled && event.responseStatus?.response !== 'declined').map(event => ({
+                id: event.id, subject: short(event.subject, 200), start: event.start?.dateTime || '',
+                end: event.end?.dateTime || '', all_day: !!event.isAllDay, link: clean(event.webLink),
+                excerpt: short(event.bodyPreview, 240)
+            }))),
+        planner: archive.feeds.filter(feed => feed.feed.startsWith('planner-')).flatMap(feed =>
+            feed.records.filter(task => task.percentComplete !== 100).map(task => ({
+                id: task.id, title: short(task.title, 220), due: clean(task.dueDateTime),
+                percent_complete: task.percentComplete ?? null, plan: clean(task.planId),
+                assigned_to_me: feed.feed === 'planner-assigned' ? true : null,
+                assignments: task._assignments ?? task.assignments ?? [],
+                link: task.planId ? 'https://planner.cloud.microsoft/webui/plan/' +
+                    encodeURIComponent(task.planId) + '/task/' + encodeURIComponent(task.id) : ''
+            })))
+    };
+}
+function normalizeOld(record) {
+    if (!['mail', 'invite'].includes(record.kind) || !clean(record.id)) return null;
+    return {
+        id: record.id.replace(/^mail:/, ''), thread_id: clean(record.conversation), from: clean(record.from),
+        date: clean(record.date), direction: clean(record.direction), subject: short(record.subject, 240),
+        excerpt: short(record.body, 420), link: clean(record.link)
+    };
+}
+function makeReview(archive, options) {
+    checkArchive(archive);
+    const { history, settings, batchSize, applyRules } = options;
+    requireValue(Number.isInteger(batchSize) && batchSize >= 1 && batchSize <= 20, 'Batch size must be 1–20.');
+    const current = readMail(archive);
+    const currentIds = new Set(current.map(message => message.id));
+    const context = contextFrom(archive);
+    const audit = current.map(message => {
+        const rule = routeMessage(message, settings.rules);
+        return { id: message.id, subject: message.subject, from: message.from, date: message.date, link: message.link,
+            rule_id: rule?.id ?? null, matched_destination: rule?.destination ?? null,
+            disposition: rule && applyRules ? 'routed' : 'review' };
+    });
+    const expected = current.filter((message, index) => audit[index].disposition === 'review');
+    const byThread = new Map();
+    const threads = new Set(current.map(message => message.thread_id).filter(Boolean));
+    const seenHistory = new Set();
+    for (const message of [...current, ...history]) {
+        if (!threads.has(message.thread_id) || !message.date || seenHistory.has(message.id)) continue;
+        seenHistory.add(message.id);
+        if (!byThread.has(message.thread_id)) byThread.set(message.thread_id, []);
+        byThread.get(message.thread_id).push(message);
+    }
+    const groups = new Map();
+    for (const mail of expected) {
+        const key = mail.thread_id ? 'thread:' + mail.thread_id : 'message:' + mail.id;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(mail);
+    }
+    const now = Date.parse(archive.checkpoint_utc);
+    requireValue(Number.isFinite(now), 'The archive cutoff is invalid.');
+    const runId = new Date(now).toISOString();
+    const batches = [];
+    const recordById = new Map(current.map(message => [message.id, message]));
+    for (const records of groups.values()) {
+        for (let offset = 0; offset < records.length; offset += batchSize) {
+            const chunk = records.slice(offset, offset + batchSize);
+            const previous = batches.at(-1);
+            if (previous && previous.emails.length + chunk.length <= batchSize) previous.emails.push(...chunk);
+            else batches.push({ emails: chunk });
+        }
+    }
+    const coverage = {
+        collected: current.length,
+        feed_counts: archive.feeds.map(feed => ({ feed: feed.feed, count: feed.verified_count })),
+        routed: audit.filter(row => row.disposition === 'routed').length,
+        queued: expected.length, dry_run: !applyRules
+    };
+    batches.forEach((batch, index) => {
+        batch.kind = 'review_batch';
+        batch.run_id = runId;
+        batch.batch_id = 'batch-' + String(index + 1).padStart(3, '0');
+        batch.work_account = clean(archive.work_account);
+        batch.mail_aliases = archive.mail_aliases || [];
+        batch.expected_ids = batch.emails.map(mail => mail.id);
+        const inputIds = new Set(batch.expected_ids);
+        batch.context_by_thread = [...new Set(batch.emails.map(mail => mail.thread_id).filter(Boolean))].map(thread => {
+            const siblings = (byThread.get(thread) || []).filter(mail => !inputIds.has(mail.id) && Date.parse(mail.date) <= now);
+            siblings.sort((a, b) => b.date.localeCompare(a.date));
+            const latestSent = siblings.find(mail => mail.direction === 'sent');
+            const selected = [...new Set([...(latestSent ? [latestSent] : []), ...siblings])].slice(0, 3);
+            return { thread_id: thread, messages: selected.map(mail => ({
+                id: mail.id, date: mail.date, from: mail.from, direction: mail.direction, subject: mail.subject,
+                excerpt: short(mail.excerpt, 420), link: mail.link, current_run: currentIds.has(mail.id)
+            })) };
+        }).filter(thread => thread.messages.length);
+        const content = batch.emails.map(mail => mail.subject + ' ' + mail.excerpt).join('\n');
+        const subjectTerms = new Set(terms(batch.emails.map(mail => mail.subject).join(' ')));
+        batch.planner_context = context.planner.filter(task =>
+            terms(task.title).some(term => subjectTerms.has(term))).slice(0, 8);
+        batch.confirmed_precedents = settings.decisions.filter(decision =>
+            decision.references.some(reference => matchesReference(content, reference))).slice(0, 6);
+    });
+    return { runId, coverage, batches, audit, context, recordById,
+        localDay: archive.local_day ?? '', timeZone: archive.time_zone ?? '',
+        windowStart: archive.window_start_utc ?? '', plannerMode: archive.planner_mode ?? '',
+        currentRules: settings.rules.length };
+}
+function parseResponse(text) {
+    const source = text.trim();
+    const fence = /^\`\`\`(?:json)?\s*([\s\S]+?)\s*\`\`\`$/i.exec(source);
+    return JSON.parse(fence ? fence[1] : source);
+}
+function linkFromSource(value) {
+    try {
+        const link = new URL(value);
+        return link.protocol === 'https:' ? link.href : '';
+    } catch { return ''; }
+}
+function acceptResults(plan, accepted, response) {
+    const submissions = Array.isArray(response) ? response : [response];
+    const staged = new Map(accepted);
+    for (const submission of submissions) {
+        requireValue(submission?.run_id === plan.runId && Array.isArray(submission.dispositions),
+            'The response needs the current run_id and a dispositions array.');
+        const batch = plan.batches.find(batch => batch.batch_id === submission.batch_id);
+        requireValue(batch, 'The response contains an unknown batch ID.');
+        const ids = new Set(batch.expected_ids);
+        const returned = new Set();
+        for (const row of submission.dispositions) {
+            requireValue(ids.has(row?.id), 'An ID does not belong to ' + batch.batch_id + '.');
+            requireValue(!returned.has(row.id), 'Duplicate message ID in ' + batch.batch_id + '.');
+            returned.add(row.id);
+            requireValue(actions.has(row.action) && clean(row.summary) &&
+                ['high', 'normal', 'low'].includes(row.priority),
+                'Invalid disposition for ' + row.id + '.');
+            requireValue(row.action === 'no_action' ? !clean(row.status) : statuses.has(row.status),
+                'Invalid status for ' + row.id + '.');
+            requireValue(!clean(row.due) || /^\d{4}-\d{2}-\d{2}$/.test(row.due), 'Use YYYY-MM-DD for due dates.');
+            const normalized = { id: row.id, action: row.action, status: clean(row.status),
+                priority: row.priority, summary: short(row.summary, 430), owner: short(row.owner, 120),
+                due: clean(row.due), next_step: short(row.next_step, 430) };
+            if (staged.has(row.id)) {
+                requireValue(JSON.stringify(staged.get(row.id)) === JSON.stringify(normalized),
+                    'A conflicting result was already accepted for ' + row.id + '.');
+            } else staged.set(row.id, normalized);
+        }
+    }
+    return staged;
+}
+function pendingBatches(plan, accepted) {
+    return plan.batches.flatMap(batch => {
+        const emails = batch.emails.filter(mail => !accepted.has(mail.id));
+        if (!emails.length) return [];
+        const contextByThread = new Map(batch.context_by_thread.map(context => [context.thread_id, [...context.messages]]));
+        for (const mail of batch.emails.filter(mail => accepted.has(mail.id) && mail.thread_id)) {
+            if (!contextByThread.has(mail.thread_id)) contextByThread.set(mail.thread_id, []);
+            contextByThread.get(mail.thread_id).unshift({ id: mail.id, date: mail.date, from: mail.from,
+                direction: mail.direction, subject: mail.subject, excerpt: short(mail.excerpt, 420),
+                link: mail.link, current_run: true });
+        }
+        return [{ ...batch, emails, expected_ids: emails.map(mail => mail.id),
+            context_by_thread: [...contextByThread].map(([thread_id, messages]) => ({ thread_id, messages: messages.slice(0, 3) })) }];
+    });
+}
+function makeBriefInput(plan, accepted) {
+    requireValue(pendingBatches(plan, accepted).length === 0, 'Some expected email IDs are still outstanding.');
+    const reactions = plan.batches.flatMap(batch => batch.expected_ids.map(id => accepted.get(id)));
+    return { kind: 'verified_review_brief', run_id: plan.runId, window_start: plan.windowStart,
+        local_day: plan.localDay, time_zone: plan.timeZone, planner_mode: plan.plannerMode,
+        coverage: { ...plan.coverage, reviewed: accepted.size, outstanding: 0 },
+        actions: reactions.filter(row => row.action !== 'no_action' || row.priority === 'high').map(row => {
+            const source = plan.recordById.get(row.id);
+            return { ...row, thread_id: source.thread_id, subject: source.subject,
+                from: source.from, link: linkFromSource(source.link) };
+        }),
+        calendar: plan.context.calendar, planner: plan.context.planner,
+        routed: plan.audit.filter(row => row.disposition === 'routed').reduce((counts, row) => {
+            counts[row.matched_destination] = (counts[row.matched_destination] || 0) + 1;
+            return counts;
+        }, Object.create(null))
+    };
+}
+
+// Browser interface
+const byId = id => document.getElementById(id);
+const files = id => [...byId(id).files];
+let plan;
+let accepted = new Map();
+
+function status(id, message, error = false) {
+    const node = byId(id);
+    node.textContent = message;
+    node.classList.toggle('error', error);
+}
+function download(name, value) {
+    const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2) + '\n'], { type: 'application/json' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = name;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function button(target, title, run) {
+    const node = document.createElement('button');
+    node.textContent = title;
+    node.onclick = run;
+    target.append(node);
+}
+async function historyRows(file, archive) {
+    if (/\.(jsonl|gz)$/i.test(file.name)) {
+        const text = /\.gz$/i.test(file.name)
+            ? await new Response(file.stream().pipeThrough(new DecompressionStream('gzip'))).text()
+            : await file.text();
+        return text.split(/\r?\n/).filter(line => line.trim()).map(line => normalizeOld(JSON.parse(line))).filter(Boolean);
+    }
+    const older = checkArchive(JSON.parse(await file.text()));
+    requireValue(!archive.work_account || lower(archive.work_account) === lower(older.work_account),
+        'History archive ' + file.name + ' uses a different work account.');
+    requireValue(Date.parse(older.checkpoint_utc) < Date.parse(archive.checkpoint_utc),
+        'History archive ' + file.name + ' is not earlier than the current archive.');
+    return readMail(older);
+}
+function refresh() {
+    const remaining = pendingBatches(plan, accepted);
+    const target = byId('downloads');
+    target.replaceChildren();
+    for (const batch of remaining) {
+        button(target, batch.batch_id + ' (' + batch.emails.length + ')', () => download(batch.batch_id + '.json', batch));
+    }
+    button(target, 'Download routing audit', () => download('routing-audit.json', {
+        run_id: plan.runId, coverage: plan.coverage, messages: plan.audit
+    }));
+    const queueNames = new Set(plan.audit.filter(row => row.disposition === 'routed').map(row => row.matched_destination));
+    [...queueNames].forEach((name, index) => button(target, 'Export ' + name, () => download(
+        'routed-' + (index + 1) + '.json', { run_id: plan.runId, destination: name,
+            messages: plan.audit.filter(row => row.disposition === 'routed' && row.matched_destination === name)
+                .map(row => ({ ...row, source: plan.recordById.get(row.id) })) }
+    )));
+    if (accepted.size) button(target, 'Save checked dispositions', () => download('checked-dispositions.json',
+        plan.batches.map(batch => ({ run_id: plan.runId, batch_id: batch.batch_id,
+            dispositions: batch.expected_ids.filter(id => accepted.has(id)).map(id => accepted.get(id)) }))
+    ));
+    byId('brief').disabled = remaining.length !== 0;
+    byId('reconcile').disabled = false;
+    const outstanding = plan.coverage.queued - accepted.size;
+    status('coverage', accepted.size + ' of ' + plan.coverage.queued + ' reviewed. ' +
+        (outstanding ? outstanding + ' outstanding. Download the remaining batches above.' : 'Coverage verified. Brief input is ready.'));
+}
+byId('prepare').onclick = async () => {
+    try {
+        const [file] = files('archive');
+        requireValue(file, 'Select the current verified archive.');
+        const archive = JSON.parse(await file.text());
+        checkArchive(archive);
+        const [config] = files('settings');
+        const settings = parseSettings(config ? JSON.parse(await config.text()) : {});
+        const history = (await Promise.all(files('history').map(file => historyRows(file, archive)))).flat();
+        plan = makeReview(archive, { settings, history, batchSize: Number(byId('size').value), applyRules: byId('apply').checked });
+        accepted = new Map();
+        const matched = plan.audit.filter(row => row.rule_id).length;
+        status('prepared', plan.coverage.collected + ' unique, non-draft mail records. ' + matched +
+            ' rule matches (' + plan.coverage.routed + ' routed). ' + plan.coverage.queued + ' queued in ' +
+            plan.batches.length + ' batches. ' + history.length + ' historical messages loaded.');
+        refresh();
+    } catch (error) { status('prepared', error.message, true); }
+};
+byId('reconcile').onclick = async () => {
+    try {
+        const response = byId('response').value.trim();
+        const inputs = await Promise.all(files('results').map(async file => parseResponse(await file.text())));
+        if (response) inputs.push(parseResponse(response));
+        requireValue(inputs.length, 'Paste the result or select one or more files.');
+        accepted = acceptResults(plan, accepted, inputs.flat());
+        byId('response').value = '';
+        byId('results').value = '';
+        refresh();
+    } catch (error) { status('coverage', error.message, true); }
+};
+byId('brief').onclick = () => download('verified-review-brief.json', makeBriefInput(plan, accepted));
+</script>
+</body>
+</html>

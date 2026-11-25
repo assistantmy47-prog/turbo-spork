@@ -4,6 +4,8 @@ Power Automate collects and verifies work Outlook and optional Planner data. It 
 
 Keep the [manual export flow](POWER-AUTOMATE.md) available while you test this setup. The scheduled flow uses its own folder and checkpoint, so it can run alongside your existing setup and six-month archive.
 
+Use the [two-pass review walkthrough](morning-review/SETUP.md) when you need a verified disposition for each eligible email. The OneDrive-only prompt is a preview.
+
 ## 1. Prepare work OneDrive
 
 1. In work OneDrive, create a folder named `WorkMailMorning` at the root.

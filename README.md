@@ -2,6 +2,8 @@
 
 For an automatic morning collection and a brief in Copilot chat, start with the [scheduled setup walkthrough](SCHEDULED-SETUP.md). This setup runs in work Power Automate and syncs verified exports through OneDrive. Daily use needs no local Python commands.
 
+For message-by-message coverage, use the [two-pass morning review](morning-review/SETUP.md). It adds a local browser check and runs both prompts in the same private Copilot agent.
+
 ## Manual collection and review
 
 Power Automate exports mail and calendar data from your work Outlook connection. The Mac verifies and archives the export, then checks that the private Microsoft 365 Copilot agent reviewed every record. No registered Entra app, client secret, or Copilot Studio is required.
