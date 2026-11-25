@@ -39,7 +39,7 @@ formatDateTime(utcNow(),'yyyy-MM-ddTHH:mm:ssZ')
 
 **Card** OneDrive for Business → Get file metadata using path
 
-- **File Path** `/WorkMailMorning/Current/WorkMailMorningInput.md`
+- **File Path** `/WorkMailMorning/Current/WorkMailMorningInput.txt`
 
 ### `Read_latest_file`
 
@@ -47,8 +47,8 @@ formatDateTime(utcNow(),'yyyy-MM-ddTHH:mm:ssZ')
 
 **Card** OneDrive for Business → Get file content using path
 
-- **File Path** `/WorkMailMorning/Current/WorkMailMorningInput.md`
-- **Infer Content Type** `true`
+- **File Path** `/WorkMailMorning/Current/WorkMailMorningInput.txt`
+- **Infer Content Type** `false` (No)
 
 ### `Read_checkpoint_line`
 

@@ -1,6 +1,6 @@
 # Set up the scheduled morning brief
 
-Power Automate collects and verifies work Outlook and optional Planner data. It publishes a dated JSON export and a single current Markdown file to work OneDrive. OneDrive syncs the export to your Mac and the Copilot agent reads the current file. Your daily action is selecting **Morning brief** in Copilot.
+Power Automate collects and verifies work Outlook and optional Planner data. It publishes a dated JSON export and a single current plain-text file to work OneDrive. OneDrive syncs the export to your Mac and the Copilot agent reads the current file. Your daily action is selecting **Morning brief** in Copilot.
 
 Keep the [manual export flow](POWER-AUTOMATE.md) available while you test this setup. The scheduled flow uses its own folder and checkpoint, so it can run alongside your existing setup and six-month archive.
 
@@ -8,8 +8,10 @@ Keep the [manual export flow](POWER-AUTOMATE.md) available while you test this s
 
 1. In work OneDrive, create a folder named `WorkMailMorning` at the root.
 2. Inside it, create two folders named `Archive` and `Current`.
-3. Download the [seed file](morning-flow/WorkMailMorningInput.md) from this repository using GitHub's raw download option and upload it into `Current`. Keep its filename and first line as supplied. The full path is `/WorkMailMorning/Current/WorkMailMorningInput.md`.
+3. Download the [seed file](morning-flow/WorkMailMorningInput.txt) from this repository using GitHub's raw download option and upload it into `Current`. Keep its filename and first line as supplied. The full path is `/WorkMailMorning/Current/WorkMailMorningInput.txt`.
 4. Leave access to the folders limited to the intended work account and existing work policy. The JSON exports include work mail and calendar data.
+
+If you already set up the older `.md` file, pause the flow, rename that file to `WorkMailMorningInput.txt` in OneDrive, and keep its contents so the checkpoint carries over. Point both `Read_latest_metadata` and `Read_latest_file` to the new path, set **Infer Content Type** to **No** on the latter, and relink the file in Copilot. The final **Update file** action uses the ID returned by `Read_latest_metadata`.
 
 The first successful run starts with 24 hours of mail history. Each later run starts 15 minutes before the last verified cutoff. Planner is a current snapshot. The calendar covers the current local day, including recurring instances. The prior six-month archive is not needed for this setup.
 
@@ -29,7 +31,7 @@ The checked-in [workflow definition](morning-flow/definition.json) provides the 
 
 1. In the flow designer select **Test → Manually → Run flow**, or use **Run** from the flow details. Check the completed run in **Run history**.
 2. Open the new `verified-*.json` in `Archive`. Confirm the metadata includes `status: verified`, the expected time window, and separate entries for received mail, sent mail and the calendar. Each feed includes the verified record count and the number of content and verification pages. The archive preserves the Graph fields selected in the flow and excludes attachment binaries.
-3. Open `Current/WorkMailMorningInput.md`. Confirm that its first line has the UTC cutoff and that it names the dated archive just created. Spot-check a received message, a sent reply, and a recurring meeting against Outlook if those items are present. The brief input keeps short source excerpts and links where supplied. Its source counts are taken before briefing filters such as excluding drafts, declined meetings and cancellations.
+3. Open `Current/WorkMailMorningInput.txt`. Confirm that its first line has the UTC cutoff and that it names the dated archive just created. Spot-check a received message, a sent reply, and a recurring meeting against Outlook if those items are present. The brief input keeps short source excerpts and links where supplied. Its source counts are taken before briefing filters such as excluding drafts, declined meetings and cancellations.
 4. Test failure recovery once. Record the current checkpoint and settings, temporarily set `Settings.work_account` to `wrong@example.com` and `mail_aliases` to `[]`, save, and run the test again. It should fail at `Validate_setup` and leave the current file and checkpoint intact. Restore the original settings and save. The next successful run resumes from the previous verified cutoff.
 5. If you want an offline copy on your Mac, locate `WorkMailMorning/Archive` in Finder under work OneDrive and select **Always Keep on This Device**, if available. Verify that the dated JSON appears in Finder. This is a synced copy subject to your work OneDrive policies. An independent archive outside OneDrive needs an approved local transfer route.
 
@@ -61,8 +63,8 @@ For selected plans, optionally fill in `planner_user_id` with your Microsoft 365
 
 1. In work Microsoft 365 Copilot, open your private agent in **Agent Builder → Configure**. You can also create a separate private **Work Morning Brief** agent to retain the original batch reviewer.
 2. Paste [the morning agent instructions](morning-flow/COPILOT-AGENT.md) into **Instructions**. If you reuse the old agent, replace its JSON batch-review instructions.
-3. Under **Knowledge**, add the work OneDrive link to the specific `WorkMailMorningInput.md` file. Keep the agent private. The file lives at a stable URL because Power Automate updates it in place.
-4. Add a suggested prompt titled **Morning brief** with the message `Give me my morning brief from today's verified WorkMailMorningInput.md.`
+3. Under **Knowledge**, use **Attach cloud files** or paste the work OneDrive link to the specific `WorkMailMorningInput.txt` file. Keep the agent private. The file lives at a stable URL because Power Automate updates it in place. Use the linked cloud file so the agent can pick up later changes.
+4. Add a suggested prompt titled **Morning brief** with the message `Give me my morning brief from today's verified WorkMailMorningInput.txt.`
 5. Save the agent. Once the OneDrive source is ready, run **Morning brief** and check the verified-through time against the UTC timestamp in the file. Check a known meeting or Planner task. Repeat after a later scheduled run to make sure the agent sees updates to the same file.
 6. Keep **Morning brief** as the one-click entry point. If your Copilot interface offers scheduling for this agent conversation, schedule the prompt after the flow has time to finish and OneDrive content has time to become available. Verify a scheduled response uses the current file before relying on it.
 

@@ -57,7 +57,7 @@
       "type": "OpenApiConnection",
       "inputs": {
         "parameters": {
-          "path": "/WorkMailMorning/Current/WorkMailMorningInput.md"
+          "path": "/WorkMailMorning/Current/WorkMailMorningInput.txt"
         },
         "host": {
           "apiId": "/providers/Microsoft.PowerApps/apis/shared_onedriveforbusiness",
@@ -75,8 +75,8 @@
       "type": "OpenApiConnection",
       "inputs": {
         "parameters": {
-          "path": "/WorkMailMorning/Current/WorkMailMorningInput.md",
-          "inferContentType": true
+          "path": "/WorkMailMorning/Current/WorkMailMorningInput.txt",
+          "inferContentType": false
         },
         "host": {
           "apiId": "/providers/Microsoft.PowerApps/apis/shared_onedriveforbusiness",
