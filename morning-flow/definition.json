@@ -40,7 +40,9 @@
         "planner_mode": "off",
         "planner_plans": [],
         "planner_user_id": "",
-        "excerpt_chars": 360
+        "excerpt_chars": 360,
+        "review_max_records": 20,
+        "review_max_bytes": 24000
       },
       "runAfter": {}
     },
@@ -263,7 +265,7 @@
       "type": "If",
       "expression": {
         "equals": [
-          "@and(contains(outputs('Known_addresses'),toLower(coalesce(json(string(body('Read_calendar_owner')))?['owner']?['address'],''))),not(empty(outputs('Sent_folder_id'))),less(ticks(outputs('Window_start')),ticks(outputs('Window_end'))),or(empty(outputs('Previous_checkpoint')),less(ticks(if(empty(outputs('Previous_checkpoint')),outputs('Window_start'),outputs('Previous_checkpoint'))),ticks(outputs('Window_end')))),contains(createArray('off','assigned','plans'),outputs('Settings')?['planner_mode']),or(not(equals(outputs('Settings')?['planner_mode'],'plans')),not(empty(outputs('Settings')?['planner_plans']))),greater(outputs('Settings')?['excerpt_chars'],0),lessOrEquals(outputs('Settings')?['excerpt_chars'],1000))",
+          "@and(contains(outputs('Known_addresses'),toLower(coalesce(json(string(body('Read_calendar_owner')))?['owner']?['address'],''))),not(empty(outputs('Sent_folder_id'))),less(ticks(outputs('Window_start')),ticks(outputs('Window_end'))),or(empty(outputs('Previous_checkpoint')),less(ticks(if(empty(outputs('Previous_checkpoint')),outputs('Window_start'),outputs('Previous_checkpoint'))),ticks(outputs('Window_end')))),contains(createArray('off','assigned','plans'),outputs('Settings')?['planner_mode']),or(not(equals(outputs('Settings')?['planner_mode'],'plans')),not(empty(outputs('Settings')?['planner_plans']))),greater(outputs('Settings')?['excerpt_chars'],0),lessOrEquals(outputs('Settings')?['excerpt_chars'],1000),greaterOrEquals(outputs('Settings')?['review_max_records'],1),lessOrEquals(outputs('Settings')?['review_max_records'],20),greaterOrEquals(outputs('Settings')?['review_max_bytes'],1024),lessOrEquals(outputs('Settings')?['review_max_bytes'],24000))",
           true
         ]
       },
@@ -276,7 +278,7 @@
               "runStatus": "Failed",
               "runError": {
                 "code": "WorkMailVerification",
-                "message": "Check the Outlook identity, time window, Planner settings, and excerpt length."
+                "message": "Check the Outlook identity, time window, Planner settings, excerpt length, and review size limits."
               }
             },
             "runAfter": {}
@@ -483,6 +485,125 @@
       },
       "runAfter": {
         "Init_Verified_feeds": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Init_Review_rows": {
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "Review_rows",
+            "type": "array",
+            "value": "@json('[]')"
+          }
+        ]
+      },
+      "runAfter": {
+        "Init_Morning_groups": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Init_Review_email_ids": {
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "Review_email_ids",
+            "type": "array",
+            "value": "@json('[]')"
+          }
+        ]
+      },
+      "runAfter": {
+        "Init_Review_rows": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Init_Review_parts": {
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "Review_parts",
+            "type": "array",
+            "value": "@json('[]')"
+          }
+        ]
+      },
+      "runAfter": {
+        "Init_Review_email_ids": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Init_Review_offset": {
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "Review_offset",
+            "type": "integer",
+            "value": 0
+          }
+        ]
+      },
+      "runAfter": {
+        "Init_Review_parts": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Init_Review_take": {
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "Review_take",
+            "type": "integer",
+            "value": 20
+          }
+        ]
+      },
+      "runAfter": {
+        "Init_Review_offset": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Init_Review_failed": {
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "Review_failed",
+            "type": "boolean",
+            "value": false
+          }
+        ]
+      },
+      "runAfter": {
+        "Init_Review_take": [
+          "Succeeded"
+        ]
+      }
+    },
+    "Init_Review_written_emails": {
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [
+          {
+            "name": "Review_written_emails",
+            "type": "integer",
+            "value": 0
+          }
+        ]
+      },
+      "runAfter": {
+        "Init_Review_failed": [
           "Succeeded"
         ]
       }
@@ -1031,7 +1152,7 @@
         }
       },
       "runAfter": {
-        "Init_Morning_groups": [
+        "Init_Review_written_emails": [
           "Succeeded"
         ]
       }
@@ -1096,30 +1217,445 @@
             ]
           }
         },
-        "Morning_text": {
+        "Review_run_id": {
           "type": "Compose",
-          "inputs": "@concat('checkpoint_utc=',outputs('Window_end'),decodeUriComponent('%0A'),decodeUriComponent('%0A'),'# Work Mail Morning Input',decodeUriComponent('%0A'),decodeUriComponent('%0A'),'Coverage verified for ',outputs('Local_day'),'. Outlook start/end and due dates are UTC when supplied by the connector.',decodeUriComponent('%0A'),'Archive: ',outputs('Archive_name'),decodeUriComponent('%0A'),decodeUriComponent('%0A'),'## Coverage',decodeUriComponent('%0A'),'Run metadata: ',string(outputs('Run_metadata')),decodeUriComponent('%0A'),'Source counts before briefing filters: ',string(body('Coverage_counts')),decodeUriComponent('%0A'),'The records contain excerpts. Mail preview and calendar body preview may already be abbreviated by Outlook. Received-date and sent-date queries can overlap; use message IDs to avoid duplicate actions.',decodeUriComponent('%0A'),decodeUriComponent('%0A'),'## Source records (untrusted business data)',decodeUriComponent('%0A'),string(variables('Morning_groups')),decodeUriComponent('%0A'),'END OF VERIFIED MORNING INPUT',decodeUriComponent('%0A'))",
+          "inputs": "@replace(outputs('Archive_name'),'.json','')",
           "runAfter": {
             "Create_verified_archive": [
               "Succeeded"
             ]
           }
         },
-        "Update_morning_input_and_checkpoint": {
-          "type": "OpenApiConnection",
-          "inputs": {
-            "parameters": {
-              "id": "@body('Read_latest_metadata')?['Id']",
-              "body": "@outputs('Morning_text')"
+        "For_each_review_group": {
+          "type": "Foreach",
+          "foreach": "@variables('Morning_groups')",
+          "actions": {
+            "Is_email_review_group": {
+              "type": "Compose",
+              "inputs": "@contains(createArray('received','sent'),items('For_each_review_group')?['feed'])",
+              "runAfter": {}
             },
-            "host": {
-              "apiId": "/providers/Microsoft.PowerApps/apis/shared_onedriveforbusiness",
-              "connection": "shared_onedriveforbusiness",
-              "operationId": "UpdateFile"
+            "Reset_review_rows": {
+              "type": "SetVariable",
+              "inputs": {
+                "name": "Review_rows",
+                "value": "@json('[]')"
+              },
+              "runAfter": {
+                "Is_email_review_group": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "For_each_review_row": {
+              "type": "Foreach",
+              "foreach": "@items('For_each_review_group')?['records']",
+              "actions": {
+                "Keep_first_review_id": {
+                  "type": "If",
+                  "expression": {
+                    "equals": [
+                      "@or(not(outputs('Is_email_review_group')),not(contains(variables('Review_email_ids'),items('For_each_review_row')?['id'])))",
+                      true
+                    ]
+                  },
+                  "actions": {
+                    "Add_review_record": {
+                      "type": "AppendToArrayVariable",
+                      "inputs": {
+                        "name": "Review_rows",
+                        "value": "@items('For_each_review_row')"
+                      },
+                      "runAfter": {}
+                    },
+                    "Record_expected_mail_id": {
+                      "type": "If",
+                      "expression": {
+                        "equals": [
+                          "@outputs('Is_email_review_group')",
+                          true
+                        ]
+                      },
+                      "actions": {
+                        "Remember_review_mail_id": {
+                          "type": "AppendToArrayVariable",
+                          "inputs": {
+                            "name": "Review_email_ids",
+                            "value": "@items('For_each_review_row')?['id']"
+                          },
+                          "runAfter": {}
+                        }
+                      },
+                      "else": {
+                        "actions": {}
+                      },
+                      "runAfter": {
+                        "Add_review_record": [
+                          "Succeeded"
+                        ]
+                      }
+                    }
+                  },
+                  "else": {
+                    "actions": {}
+                  },
+                  "runAfter": {}
+                }
+              },
+              "runAfter": {
+                "Reset_review_rows": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Has_records_to_pack": {
+              "type": "If",
+              "expression": {
+                "equals": [
+                  "@and(not(variables('Review_failed')),not(empty(variables('Review_rows'))))",
+                  true
+                ]
+              },
+              "actions": {
+                "Reset_review_offset": {
+                  "type": "SetVariable",
+                  "inputs": {
+                    "name": "Review_offset",
+                    "value": 0
+                  },
+                  "runAfter": {}
+                },
+                "Reset_review_take": {
+                  "type": "SetVariable",
+                  "inputs": {
+                    "name": "Review_take",
+                    "value": "@outputs('Settings')?['review_max_records']"
+                  },
+                  "runAfter": {
+                    "Reset_review_offset": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Pack_review_parts": {
+                  "type": "Until",
+                  "expression": "@or(greaterOrEquals(variables('Review_offset'),length(variables('Review_rows'))),variables('Review_failed'))",
+                  "limit": {
+                    "count": 1000,
+                    "timeout": "PT1H"
+                  },
+                  "actions": {
+                    "Part_records": {
+                      "type": "Compose",
+                      "inputs": "@take(skip(variables('Review_rows'),variables('Review_offset')),variables('Review_take'))",
+                      "runAfter": {}
+                    },
+                    "Part_ids": {
+                      "type": "Select",
+                      "inputs": {
+                        "from": "@outputs('Part_records')",
+                        "select": {
+                          "id": "@item()?['id']"
+                        }
+                      },
+                      "runAfter": {
+                        "Part_records": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Part_id": {
+                      "type": "Compose",
+                      "inputs": "@concat('batch-',formatNumber(add(length(variables('Review_parts')),1),'000','en-US'))",
+                      "runAfter": {
+                        "Part_ids": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Part_filename": {
+                      "type": "Compose",
+                      "inputs": "@concat(outputs('Review_run_id'),'-',outputs('Part_id'),'.json')",
+                      "runAfter": {
+                        "Part_id": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Review_payload": {
+                      "type": "Compose",
+                      "inputs": "@string(setProperty(setProperty(setProperty(setProperty(setProperty(setProperty(setProperty(setProperty(json('{}'),'kind',if(outputs('Is_email_review_group'),'review_batch','context_batch')),'run_id',outputs('Review_run_id')),'batch_id',outputs('Part_id')),'feed',items('For_each_review_group')?['feed']),'work_account',outputs('Settings')?['work_account']),'mail_aliases',outputs('Known_addresses')),'expected_ids',body('Part_ids')),'records',outputs('Part_records')))",
+                      "runAfter": {
+                        "Part_filename": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Encode_review_payload": {
+                      "type": "Compose",
+                      "inputs": "@base64(outputs('Review_payload'))",
+                      "runAfter": {
+                        "Review_payload": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Part_bytes": {
+                      "type": "Compose",
+                      "inputs": "@sub(div(mul(length(outputs('Encode_review_payload')),3),4),if(endsWith(outputs('Encode_review_payload'),'=='),2,if(endsWith(outputs('Encode_review_payload'),'='),1,0)))",
+                      "runAfter": {
+                        "Encode_review_payload": [
+                          "Succeeded"
+                        ]
+                      }
+                    },
+                    "Fits_review_file": {
+                      "type": "If",
+                      "expression": {
+                        "equals": [
+                          "@lessOrEquals(outputs('Part_bytes'),outputs('Settings')?['review_max_bytes'])",
+                          true
+                        ]
+                      },
+                      "actions": {
+                        "Create_review_part": {
+                          "type": "OpenApiConnection",
+                          "inputs": {
+                            "host": {
+                              "apiId": "/providers/Microsoft.PowerApps/apis/shared_onedriveforbusiness",
+                              "connection": "shared_onedriveforbusiness",
+                              "operationId": "CreateFile"
+                            },
+                            "parameters": {
+                              "folderPath": "/WorkMailMorning/Review",
+                              "name": "@outputs('Part_filename')",
+                              "body": "@base64ToBinary(outputs('Encode_review_payload'))"
+                            }
+                          },
+                          "runAfter": {}
+                        },
+                        "Remember_review_part": {
+                          "type": "AppendToArrayVariable",
+                          "inputs": {
+                            "name": "Review_parts",
+                            "value": "@setProperty(setProperty(setProperty(setProperty(setProperty(setProperty(setProperty(json('{}'),'batch_id',outputs('Part_id')),'filename',outputs('Part_filename')),'feed',items('For_each_review_group')?['feed']),'kind',if(outputs('Is_email_review_group'),'review_batch','context_batch')),'record_count',length(outputs('Part_records'))),'expected_ids',body('Part_ids')),'utf8_bytes',outputs('Part_bytes'))"
+                          },
+                          "runAfter": {
+                            "Create_review_part": [
+                              "Succeeded"
+                            ]
+                          }
+                        },
+                        "Advance_review_offset": {
+                          "type": "IncrementVariable",
+                          "inputs": {
+                            "name": "Review_offset",
+                            "value": "@length(outputs('Part_records'))"
+                          },
+                          "runAfter": {
+                            "Remember_review_part": [
+                              "Succeeded"
+                            ]
+                          }
+                        },
+                        "Count_written_emails": {
+                          "type": "IncrementVariable",
+                          "inputs": {
+                            "name": "Review_written_emails",
+                            "value": "@if(outputs('Is_email_review_group'),length(outputs('Part_records')),0)"
+                          },
+                          "runAfter": {
+                            "Advance_review_offset": [
+                              "Succeeded"
+                            ]
+                          }
+                        },
+                        "Restore_review_take": {
+                          "type": "SetVariable",
+                          "inputs": {
+                            "name": "Review_take",
+                            "value": "@outputs('Settings')?['review_max_records']"
+                          },
+                          "runAfter": {
+                            "Count_written_emails": [
+                              "Succeeded"
+                            ]
+                          }
+                        }
+                      },
+                      "else": {
+                        "actions": {
+                          "Can_split_review_part": {
+                            "type": "If",
+                            "expression": {
+                              "equals": [
+                                "@greater(length(outputs('Part_records')),1)",
+                                true
+                              ]
+                            },
+                            "actions": {
+                              "Reduce_review_take": {
+                                "type": "SetVariable",
+                                "inputs": {
+                                  "name": "Review_take",
+                                  "value": "@div(length(outputs('Part_records')),2)"
+                                },
+                                "runAfter": {}
+                              }
+                            },
+                            "else": {
+                              "actions": {
+                                "Flag_oversize_record": {
+                                  "type": "SetVariable",
+                                  "inputs": {
+                                    "name": "Review_failed",
+                                    "value": true
+                                  },
+                                  "runAfter": {}
+                                }
+                              }
+                            },
+                            "runAfter": {}
+                          }
+                        }
+                      },
+                      "runAfter": {
+                        "Part_bytes": [
+                          "Succeeded"
+                        ]
+                      }
+                    }
+                  },
+                  "runAfter": {
+                    "Reset_review_take": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Verify_group_written": {
+                  "type": "If",
+                  "expression": {
+                    "equals": [
+                      "@equals(variables('Review_offset'),length(variables('Review_rows')))",
+                      true
+                    ]
+                  },
+                  "actions": {},
+                  "else": {
+                    "actions": {
+                      "Flag_unwritten_records": {
+                        "type": "SetVariable",
+                        "inputs": {
+                          "name": "Review_failed",
+                          "value": true
+                        },
+                        "runAfter": {}
+                      }
+                    }
+                  },
+                  "runAfter": {
+                    "Pack_review_parts": [
+                      "Succeeded"
+                    ]
+                  }
+                }
+              },
+              "else": {
+                "actions": {}
+              },
+              "runAfter": {
+                "For_each_review_row": [
+                  "Succeeded"
+                ]
+              }
             }
           },
           "runAfter": {
-            "Morning_text": [
+            "Review_run_id": [
+              "Succeeded"
+            ]
+          }
+        },
+        "Publish_complete_review_run": {
+          "type": "If",
+          "expression": {
+            "equals": [
+              "@and(not(variables('Review_failed')),equals(variables('Review_written_emails'),length(variables('Review_email_ids'))))",
+              true
+            ]
+          },
+          "actions": {
+            "Review_manifest_name": {
+              "type": "Compose",
+              "inputs": "@concat(outputs('Review_run_id'),'-manifest.json')",
+              "runAfter": {}
+            },
+            "Create_review_manifest": {
+              "type": "OpenApiConnection",
+              "inputs": {
+                "host": {
+                  "apiId": "/providers/Microsoft.PowerApps/apis/shared_onedriveforbusiness",
+                  "connection": "shared_onedriveforbusiness",
+                  "operationId": "CreateFile"
+                },
+                "parameters": {
+                  "folderPath": "/WorkMailMorning/Review",
+                  "name": "@outputs('Review_manifest_name')",
+                  "body": "@string(setProperty(setProperty(setProperty(setProperty(setProperty(setProperty(setProperty(outputs('Run_metadata'),'run_id',outputs('Review_run_id')),'archive',outputs('Archive_name')),'expected_email_ids',variables('Review_email_ids')),'queued_emails',length(variables('Review_email_ids'))),'max_records',outputs('Settings')?['review_max_records']),'max_utf8_bytes',outputs('Settings')?['review_max_bytes']),'files',variables('Review_parts')))"
+                }
+              },
+              "runAfter": {
+                "Review_manifest_name": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Morning_text": {
+              "type": "Compose",
+              "inputs": "@concat('checkpoint_utc=',outputs('Window_end'),decodeUriComponent('%0A'),decodeUriComponent('%0A'),'# Work Mail Morning Input',decodeUriComponent('%0A'),'Verified collection date: ',outputs('Local_day'),decodeUriComponent('%0A'),'Archive: ',outputs('Archive_name'),decodeUriComponent('%0A'),'Review folder: /WorkMailMorning/Review',decodeUriComponent('%0A'),'Review manifest: ',outputs('Review_manifest_name'),decodeUriComponent('%0A'),'Queued distinct emails: ',string(length(variables('Review_email_ids'))),decodeUriComponent('%0A'),'Review and context files: ',string(length(variables('Review_parts'))),decodeUriComponent('%0A'),'Source counts before review filters: ',string(body('Coverage_counts')),decodeUriComponent('%0A'),'Email review status: pending. Use the numbered JSON files.',decodeUriComponent('%0A'))",
+              "runAfter": {
+                "Create_review_manifest": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Update_morning_input_and_checkpoint": {
+              "type": "OpenApiConnection",
+              "inputs": {
+                "parameters": {
+                  "id": "@body('Read_latest_metadata')?['Id']",
+                  "body": "@outputs('Morning_text')"
+                },
+                "host": {
+                  "apiId": "/providers/Microsoft.PowerApps/apis/shared_onedriveforbusiness",
+                  "connection": "shared_onedriveforbusiness",
+                  "operationId": "UpdateFile"
+                }
+              },
+              "runAfter": {
+                "Morning_text": [
+                  "Succeeded"
+                ]
+              }
+            }
+          },
+          "else": {
+            "actions": {
+              "Fail_review_packing": {
+                "type": "Terminate",
+                "inputs": {
+                  "runStatus": "Failed",
+                  "runError": {
+                    "code": "ReviewPackingIncomplete",
+                    "message": "Some review records could not be written within the configured limit. Check the review groups and lower the excerpt length if one record is too large. The previous checkpoint remains current."
+                  }
+                },
+                "runAfter": {}
+              }
+            }
+          },
+          "runAfter": {
+            "For_each_review_group": [
               "Succeeded"
             ]
           }

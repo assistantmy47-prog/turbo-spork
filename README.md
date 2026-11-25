@@ -2,7 +2,7 @@
 
 For an automatic morning collection and a brief in Copilot chat, start with the [scheduled setup walkthrough](SCHEDULED-SETUP.md). This setup runs in work Power Automate and syncs verified exports through OneDrive. Daily use needs no local Python commands.
 
-For message-by-message coverage, use the [two-pass morning review](morning-review/SETUP.md). It adds a local browser check and runs both prompts in the same private Copilot agent.
+For message-by-message coverage, use the [multiple-file review prototype](morning-flow/REVIEW-PROTOTYPE.md). Power Automate generates size-checked JSON batches for the same private Copilot agent.
 
 ## Manual collection and review
 

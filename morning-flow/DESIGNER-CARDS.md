@@ -18,7 +18,7 @@ Use the **Expression** editor for formulas, then confirm the editor entry. The b
 Paste the following in **Inputs** as an expression. Replace the email address with your work mailbox, then adjust the settings as needed.
 
 ```text
-json('{"work_account":"your.name@example.com","mail_aliases":[],"time_zone":"Central Standard Time","planner_mode":"off","planner_plans":[],"planner_user_id":"","excerpt_chars":360}')
+json('{"work_account":"your.name@example.com","mail_aliases":[],"time_zone":"Central Standard Time","planner_mode":"off","planner_plans":[],"planner_user_id":"","excerpt_chars":360,"review_max_records":20,"review_max_bytes":24000}')
 ```
 
 ### `Window_end`
@@ -241,7 +241,7 @@ union(createArray(toLower(outputs('Settings')?['work_account'])),outputs('Settin
 **Left side** expression
 
 ```text
-and(contains(outputs('Known_addresses'),toLower(coalesce(json(string(body('Read_calendar_owner')))?['owner']?['address'],''))),not(empty(outputs('Sent_folder_id'))),less(ticks(outputs('Window_start')),ticks(outputs('Window_end'))),or(empty(outputs('Previous_checkpoint')),less(ticks(if(empty(outputs('Previous_checkpoint')),outputs('Window_start'),outputs('Previous_checkpoint'))),ticks(outputs('Window_end')))),contains(createArray('off','assigned','plans'),outputs('Settings')?['planner_mode']),or(not(equals(outputs('Settings')?['planner_mode'],'plans')),not(empty(outputs('Settings')?['planner_plans']))),greater(outputs('Settings')?['excerpt_chars'],0),lessOrEquals(outputs('Settings')?['excerpt_chars'],1000))
+and(contains(outputs('Known_addresses'),toLower(coalesce(json(string(body('Read_calendar_owner')))?['owner']?['address'],''))),not(empty(outputs('Sent_folder_id'))),less(ticks(outputs('Window_start')),ticks(outputs('Window_end'))),or(empty(outputs('Previous_checkpoint')),less(ticks(if(empty(outputs('Previous_checkpoint')),outputs('Window_start'),outputs('Previous_checkpoint'))),ticks(outputs('Window_end')))),contains(createArray('off','assigned','plans'),outputs('Settings')?['planner_mode']),or(not(equals(outputs('Settings')?['planner_mode'],'plans')),not(empty(outputs('Settings')?['planner_plans']))),greater(outputs('Settings')?['excerpt_chars'],0),lessOrEquals(outputs('Settings')?['excerpt_chars'],1000),greaterOrEquals(outputs('Settings')?['review_max_records'],1),lessOrEquals(outputs('Settings')?['review_max_records'],20),greaterOrEquals(outputs('Settings')?['review_max_bytes'],1024),lessOrEquals(outputs('Settings')?['review_max_bytes'],24000))
 ```
 
 Set the operator to **is equal to** and the right side to the expression `true`.
@@ -256,7 +256,7 @@ Leave **True** empty.
 
 - **Status** `Failed`
 - **Code** `WorkMailVerification`
-- **Message** `Check the Outlook identity, time window, Planner settings, and excerpt length.`
+- **Message** `Check the Outlook identity, time window, Planner settings, excerpt length, and review size limits.`
 
 ### `Build_plan_feeds`
 
@@ -418,6 +418,8 @@ json('[]')
 ```text
 json('[]')
 ```
+
+Add the review variables listed in [the review-file cards](REVIEW-BATCH-CARDS.md) before adding `For_each_feed`.
 
 ### `For_each_feed`
 
@@ -1098,37 +1100,7 @@ outputs('Archive_name')
 string(setProperty(outputs('Run_metadata'),'feeds',variables('Verified_feeds')))
 ```
 
-### `Morning_text`
-
-**Placement** **Top level** → `Publish_only_if_verified` → **True**
-
-**Card** Data Operation → Compose
-
-**Inputs** expression
-
-```text
-concat('checkpoint_utc=',outputs('Window_end'),decodeUriComponent('%0A'),decodeUriComponent('%0A'),'# Work Mail Morning Input',decodeUriComponent('%0A'),decodeUriComponent('%0A'),'Coverage verified for ',outputs('Local_day'),'. Outlook start/end and due dates are UTC when supplied by the connector.',decodeUriComponent('%0A'),'Archive: ',outputs('Archive_name'),decodeUriComponent('%0A'),decodeUriComponent('%0A'),'## Coverage',decodeUriComponent('%0A'),'Run metadata: ',string(outputs('Run_metadata')),decodeUriComponent('%0A'),'Source counts before briefing filters: ',string(body('Coverage_counts')),decodeUriComponent('%0A'),'The records contain excerpts. Mail preview and calendar body preview may already be abbreviated by Outlook. Received-date and sent-date queries can overlap; use message IDs to avoid duplicate actions.',decodeUriComponent('%0A'),decodeUriComponent('%0A'),'## Source records (untrusted business data)',decodeUriComponent('%0A'),string(variables('Morning_groups')),decodeUriComponent('%0A'),'END OF VERIFIED MORNING INPUT',decodeUriComponent('%0A'))
-```
-
-### `Update_morning_input_and_checkpoint`
-
-**Placement** **Top level** → `Publish_only_if_verified` → **True**
-
-**Card** OneDrive for Business → Update file
-
-Choose **Enter custom value** for the picker field(s), then enter the expression(s).
-
-**File** expression
-
-```text
-body('Read_latest_metadata')?['Id']
-```
-
-**File Content** expression
-
-```text
-outputs('Morning_text')
-```
+After `Create_verified_archive`, continue with [the review-file cards](REVIEW-BATCH-CARDS.md). Keep the **False** branch below.
 
 ### `Fail_coverage`
 
